@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from mewcode.agent import (
+from codeyx.agent import (
     Agent,
     ErrorEvent,
     LoopComplete,
@@ -18,11 +18,11 @@ from mewcode.agent import (
     UsageEvent,
     partition_tool_calls,
 )
-from mewcode.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
-from mewcode.client import LLMClient
-from mewcode.conversation import ConversationManager
-from mewcode.tools import create_default_registry
-from mewcode.tools.base import (
+from codeyx.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
+from codeyx.client import LLMClient
+from codeyx.conversation import ConversationManager
+from codeyx.tools import create_default_registry
+from codeyx.tools.base import (
     StreamEnd,
     StreamEvent,
     TextDelta,
@@ -122,13 +122,13 @@ async def test_multi_step_autonomous():
         # Turn 1: WriteFile
         [
             TextDelta("Creating file."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "/tmp/mewcode_test_hello.txt", "content": "Hello World"}),
+            ToolCallComplete("t1", "WriteFile", {"file_path": "/tmp/codeyx_test_hello.txt", "content": "Hello World"}),
             StreamEnd("end_turn", input_tokens=10, output_tokens=20),
         ],
         # Turn 2: ReadFile to verify
         [
             TextDelta("Verifying content."),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/mewcode_test_hello.txt"}),
+            ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/codeyx_test_hello.txt"}),
             StreamEnd("end_turn", input_tokens=40, output_tokens=25),
         ],
         # Turn 3: final answer
@@ -387,7 +387,7 @@ async def test_token_usage_accumulates():
 @pytest.mark.asyncio
 async def test_plan_mode():
     """Plan mode via permission_mode."""
-    from mewcode.permissions import PermissionMode
+    from codeyx.permissions import PermissionMode
 
     registry = create_default_registry()
     agent = Agent(MockLLMClient([]), registry, "anthropic")
@@ -406,7 +406,7 @@ async def test_plan_mode():
 @pytest.mark.asyncio
 async def test_plan_mode_denied_tool_returns_error():
     """In plan mode, write tools are denied by permission checker."""
-    from mewcode.permissions import (
+    from codeyx.permissions import (
         DangerousCommandDetector,
         PathSandbox,
         PermissionChecker,
@@ -449,7 +449,7 @@ async def test_plan_mode_denied_tool_returns_error():
 
 def test_partition_tool_calls():
     """Partition groups concurrent-safe calls together."""
-    from mewcode.tools.base import ToolCallComplete
+    from codeyx.tools.base import ToolCallComplete
 
     calls = [
         ToolCallComplete("1", "ReadFile", {}),
@@ -467,7 +467,7 @@ def test_partition_tool_calls():
 
 def test_system_prompt_normal():
     sp = build_system_prompt()
-    assert "MewCode" in sp
+    assert "CodeYX" in sp
     assert "Plan mode" not in sp
 
 def test_system_prompt_plan():

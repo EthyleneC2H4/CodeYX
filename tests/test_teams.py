@@ -14,32 +14,32 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mewcode.teams.models import (
+from codeyx.teams.models import (
     AgentTeam,
     BackendType,
     TeammateInfo,
     resolve_team_dir,
     unique_team_name,
 )
-from mewcode.teams.shared_task import SharedTask, SharedTaskStore
-from mewcode.teams.mailbox import Mailbox, MailboxMessage, create_message
-from mewcode.teams.registry import AgentNameRegistry
-from mewcode.teams.backend_detect import BackendDetectionError, detect_backend
-from mewcode.teams.coordinator import (
+from codeyx.teams.shared_task import SharedTask, SharedTaskStore
+from codeyx.teams.mailbox import Mailbox, MailboxMessage, create_message
+from codeyx.teams.registry import AgentNameRegistry
+from codeyx.teams.backend_detect import BackendDetectionError, detect_backend
+from codeyx.teams.coordinator import (
     get_coordinator_system_prompt,
     get_coordinator_user_context,
     is_coordinator_mode,
     match_session_mode,
 )
-from mewcode.agents.tool_filter import (
+from codeyx.agents.tool_filter import (
     COORDINATOR_MODE_ALLOWED_TOOLS,
     IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
     TEAMMATE_COORDINATION_TOOLS,
     build_teammate_tools,
     apply_coordinator_filter,
 )
-from mewcode.tools import ToolRegistry
-from mewcode.tools.base import Tool, ToolResult
+from codeyx.tools import ToolRegistry
+from codeyx.tools.base import Tool, ToolResult
 
 # =====================================================================
 # Helpers
@@ -166,10 +166,10 @@ class TestModels:
         assert team.all_idle() is False
 
     def test_unique_team_name(self, tmp_dir):
-        with patch("mewcode.teams.models.Path.home", return_value=Path(tmp_dir)):
+        with patch("codeyx.teams.models.Path.home", return_value=Path(tmp_dir)):
             name1 = unique_team_name("my-team")
             assert name1 == "my-team"
-            (Path(tmp_dir) / ".mewcode" / "teams" / "my-team").mkdir(parents=True)
+            (Path(tmp_dir) / ".codeyx" / "teams" / "my-team").mkdir(parents=True)
             name2 = unique_team_name("my-team")
             assert name2 == "my-team-2"
 
@@ -351,7 +351,7 @@ class TestBackendDetect:
     def test_iterm2_with_it2(self):
         env = {"TERM_PROGRAM": "iTerm.app"}
         with patch.dict(os.environ, env, clear=False):
-            with patch("mewcode.teams.backend_detect.shutil.which") as mock_which:
+            with patch("codeyx.teams.backend_detect.shutil.which") as mock_which:
                 def which_side_effect(cmd):
                     if cmd == "it2":
                         return "/usr/local/bin/it2"
@@ -368,7 +368,7 @@ class TestBackendDetect:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TMUX", None)
             os.environ.pop("TERM_PROGRAM", None)
-            with patch("mewcode.teams.backend_detect.shutil.which") as mock_which:
+            with patch("codeyx.teams.backend_detect.shutil.which") as mock_which:
                 mock_which.return_value = "/usr/bin/tmux"
                 result = detect_backend()
                 assert result == BackendType.TMUX
@@ -377,7 +377,7 @@ class TestBackendDetect:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TMUX", None)
             os.environ.pop("TERM_PROGRAM", None)
-            with patch("mewcode.teams.backend_detect.shutil.which", return_value=None):
+            with patch("codeyx.teams.backend_detect.shutil.which", return_value=None):
                 with pytest.raises(BackendDetectionError):
                     detect_backend()
 
@@ -421,16 +421,16 @@ class TestCoordinatorMode:
         assert is_coordinator_mode(enable_flag=False) is False
 
     def test_enabled_with_flag_and_env(self):
-        with patch.dict(os.environ, {"MEWCODE_COORDINATOR_MODE": "1"}):
+        with patch.dict(os.environ, {"CODEX_COORDINATOR_MODE": "1"}):
             assert is_coordinator_mode(enable_flag=True) is True
 
     def test_flag_without_env(self):
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("MEWCODE_COORDINATOR_MODE", None)
+            os.environ.pop("CODEX_COORDINATOR_MODE", None)
             assert is_coordinator_mode(enable_flag=True) is False
 
     def test_env_without_flag(self):
-        with patch.dict(os.environ, {"MEWCODE_COORDINATOR_MODE": "1"}):
+        with patch.dict(os.environ, {"CODEX_COORDINATOR_MODE": "1"}):
             assert is_coordinator_mode(enable_flag=False) is False
 
     def test_system_prompt_contains_phases(self):
@@ -456,17 +456,17 @@ class TestCoordinatorMode:
         assert "<task-id>" in prompt
 
     def test_match_session_mode_no_switch(self):
-        with patch.dict(os.environ, {"MEWCODE_COORDINATOR_MODE": "1"}):
+        with patch.dict(os.environ, {"CODEX_COORDINATOR_MODE": "1"}):
             result = match_session_mode("coordinator", enable_flag=True)
             assert result is None
 
     def test_match_session_mode_switch_to_coordinator(self):
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("MEWCODE_COORDINATOR_MODE", None)
+            os.environ.pop("CODEX_COORDINATOR_MODE", None)
             result = match_session_mode("coordinator", enable_flag=True)
             assert result is not None
             assert "Entered" in result
-            assert os.environ.get("MEWCODE_COORDINATOR_MODE") == "1"
+            assert os.environ.get("CODEX_COORDINATOR_MODE") == "1"
 
     def test_match_session_mode_none(self):
         result = match_session_mode(None)
@@ -483,13 +483,13 @@ class TestCoordinatorMode:
 
 class TestConfigExtensions:
     def test_teammate_mode_defaults(self):
-        from mewcode.config import AppConfig
+        from codeyx.config import AppConfig
         cfg = AppConfig(providers=[])
         assert cfg.teammate_mode == ""
         assert cfg.enable_coordinator_mode is False
 
     def test_load_config_with_team_fields(self, tmp_dir):
-        from mewcode.config import load_config
+        from codeyx.config import load_config
         config_path = Path(tmp_dir) / "config.yaml"
         config_path.write_text(
             "providers:\n"
@@ -505,7 +505,7 @@ class TestConfigExtensions:
         assert cfg.enable_coordinator_mode is True
 
     def test_invalid_teammate_mode(self, tmp_dir):
-        from mewcode.config import ConfigError, load_config
+        from codeyx.config import ConfigError, load_config
         config_path = Path(tmp_dir) / "config.yaml"
         config_path.write_text(
             "providers:\n"
@@ -525,14 +525,14 @@ class TestConfigExtensions:
 class TestTranscript:
 
     def test_save_and_load(self, tmp_dir):
-        from mewcode.conversation import ConversationManager
-        from mewcode.teams.transcript import load_transcript, save_transcript
+        from codeyx.conversation import ConversationManager
+        from codeyx.teams.transcript import load_transcript, save_transcript
 
         conv = ConversationManager()
         conv.add_user_message("Hello agent")
         conv.add_assistant_message("Hello user")
 
-        with patch("mewcode.teams.models.Path.home", return_value=Path(tmp_dir)):
+        with patch("codeyx.teams.models.Path.home", return_value=Path(tmp_dir)):
             save_transcript("test-team", "agent-001", conv)
             restored = load_transcript("test-team", "agent-001")
 
@@ -543,8 +543,8 @@ class TestTranscript:
         assert restored.history[1].role == "assistant"
 
     def test_load_nonexistent(self, tmp_dir):
-        from mewcode.teams.transcript import load_transcript
-        with patch("mewcode.teams.models.Path.home", return_value=Path(tmp_dir)):
+        from codeyx.teams.transcript import load_transcript
+        with patch("codeyx.teams.models.Path.home", return_value=Path(tmp_dir)):
             result = load_transcript("no-team", "no-agent")
         assert result is None
 
@@ -554,19 +554,19 @@ class TestTranscript:
 
 class TestAgentCoordinatorIntegration:
     def test_normal_prompt(self):
-        from mewcode.prompts import build_system_prompt, BASE_PERSONA
+        from codeyx.prompts import build_system_prompt, BASE_PERSONA
         prompt = build_system_prompt()
         assert BASE_PERSONA in prompt
 
     def test_coordinator_prompt(self):
-        from mewcode.prompts import build_system_prompt
+        from codeyx.prompts import build_system_prompt
         prompt = build_system_prompt(coordinator_mode=True)
         assert "coordinator" in prompt.lower()
         assert "Research" in prompt
         assert "Synthesis" in prompt
 
     def test_coordinator_overrides_plan(self):
-        from mewcode.prompts import build_system_prompt, PLAN_MODE_INSTRUCTIONS
+        from codeyx.prompts import build_system_prompt, PLAN_MODE_INSTRUCTIONS
         prompt = build_system_prompt(plan_mode=True, coordinator_mode=True)
         assert PLAN_MODE_INSTRUCTIONS not in prompt
         assert "coordinator" in prompt.lower()

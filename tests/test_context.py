@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from mewcode.context.manager import (
+from codeyx.context.manager import (
     AGGREGATE_CHAR_LIMIT,
     PERSISTED_TAG,
     SINGLE_RESULT_CHAR_LIMIT,
@@ -23,7 +23,7 @@ from mewcode.context.manager import (
     persist_tool_result,
     should_auto_compact,
 )
-from mewcode.conversation import (
+from codeyx.conversation import (
     ConversationManager,
     Message,
     ToolResultBlock,

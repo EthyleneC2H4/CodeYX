@@ -1,10 +1,10 @@
-# MewCode
+# CodeYX
 
 A lightweight terminal-native AI Coding Agent built from scratch in Python. It gives LLMs the ability to read, write, and execute code autonomously through a structured tool-calling loop.
 
 ## Architecture
 
-MewCode is organized into five layers, each responsible for a distinct concern:
+CodeYX is organized into five layers, each responsible for a distinct concern:
 
 ```
   Presentation  ──  Textual TUI + Slash Commands
@@ -49,7 +49,7 @@ The Agent loop follows the ReAct pattern: LLM generates text or tool calls  Agen
 
 ### 1. Configuration
 
-Create `.mewcode/config.yaml` in your project directory (or `~/.mewcode/config.yaml` for user-wide settings):
+Create `.codeyx/config.yaml` in your project directory (or `~/.codeyx/config.yaml` for user-wide settings):
 
 ```yaml
 providers:
@@ -97,7 +97,7 @@ providers:
 uv sync
 
 # Launch the TUI
-uv run mewcode
+uv run codeyx
 ```
 
 ### 3. Running Tests
@@ -109,7 +109,7 @@ uv run pytest
 ## Project Structure
 
 ```
-mewcode/
+codeyx/
   agent.py          Core ReAct loop (async generator, event-driven)
   client.py         LLM abstraction (Anthropic / OpenAI / DeepSeek / OpenAI-Compat)
   app.py            Textual TUI application (~1650 lines)

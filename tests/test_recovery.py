@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from mewcode.context.manager import (
+from codeyx.context.manager import (
     RECOVERY_FILE_LIMIT,
     RECOVERY_SKILLS_BUDGET,
     RECOVERY_TOKENS_PER_FILE,

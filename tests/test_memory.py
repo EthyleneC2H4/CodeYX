@@ -8,19 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from mewcode.conversation import (
+from codeyx.conversation import (
     ConversationManager,
     Message,
     ToolResultBlock,
     ToolUseBlock,
 )
-from mewcode.memory.auto_memory import MemoryManager
-from mewcode.memory.instructions import (
+from codeyx.memory.auto_memory import MemoryManager
+from codeyx.memory.instructions import (
     MAX_INCLUDE_DEPTH,
     load_instructions,
     process_includes,
 )
-from mewcode.memory.session import (
+from codeyx.memory.session import (
     RecordType,
     ResumeResult,
     Session,
@@ -33,7 +33,7 @@ from mewcode.memory.session import (
 )
 
 # =========================================================================
-# A. Instructions (MEWCODE.md)
+# A. Instructions (CODEX.md)
 # =========================================================================
 
 class TestProcessIncludes:
@@ -77,17 +77,17 @@ class TestProcessIncludes:
 
 class TestLoadInstructions:
     def test_single_layer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        mewcode_md = tmp_path / "MEWCODE.md"
-        mewcode_md.write_text("project instructions", encoding="utf-8")
+        codeyx_md = tmp_path / "CODEX.md"
+        codeyx_md.write_text("project instructions", encoding="utf-8")
         result = load_instructions(str(tmp_path))
         assert "project instructions" in result
 
     def test_multi_layer_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        root_md = tmp_path / "MEWCODE.md"
+        root_md = tmp_path / "CODEX.md"
         root_md.write_text("root level", encoding="utf-8")
-        dotdir = tmp_path / ".mewcode"
+        dotdir = tmp_path / ".codeyx"
         dotdir.mkdir()
-        dot_md = dotdir / "MEWCODE.md"
+        dot_md = dotdir / "CODEX.md"
         dot_md.write_text("dotdir level", encoding="utf-8")
         result = load_instructions(str(tmp_path))
         assert result.index("root level") < result.index("dotdir level")
@@ -161,7 +161,7 @@ class TestSessionRecord:
 
 class TestSession:
     def test_append_writes_jsonl_and_updates_meta(self, tmp_path: Path) -> None:
-        sessions_dir = tmp_path / ".mewcode" / "sessions"
+        sessions_dir = tmp_path / ".codeyx" / "sessions"
         sessions_dir.mkdir(parents=True)
         meta = SessionMeta(id="test_session")
         meta.save(sessions_dir / "test_session.meta")
@@ -178,7 +178,7 @@ class TestSession:
         assert meta.title == "hello"
 
     def test_title_set_from_first_user_message(self, tmp_path: Path) -> None:
-        sessions_dir = tmp_path / ".mewcode" / "sessions"
+        sessions_dir = tmp_path / ".codeyx" / "sessions"
         sessions_dir.mkdir(parents=True)
         meta = SessionMeta(id="test_session")
         jsonl_path = sessions_dir / "test_session.jsonl"
@@ -431,11 +431,11 @@ class TestMemoryManager:
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
-        user_mem = fake_home / ".mewcode" / "memories.md"
+        user_mem = fake_home / ".codeyx" / "memories.md"
         user_mem.parent.mkdir(parents=True)
         user_mem.write_text("### 用户偏好\n- prefer spaces", encoding="utf-8")
 
-        project_mem = tmp_path / "project" / ".mewcode" / "memories.md"
+        project_mem = tmp_path / "project" / ".codeyx" / "memories.md"
         project_mem.parent.mkdir(parents=True)
         project_mem.write_text("### 项目知识\n- uses PostgreSQL", encoding="utf-8")
 
@@ -449,11 +449,11 @@ class TestMemoryManager:
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
-        user_mem = fake_home / ".mewcode" / "memories.md"
+        user_mem = fake_home / ".codeyx" / "memories.md"
         user_mem.parent.mkdir(parents=True)
         user_mem.write_text("### 用户偏好\n- something", encoding="utf-8")
 
-        project_mem = tmp_path / "project" / ".mewcode" / "memories.md"
+        project_mem = tmp_path / "project" / ".codeyx" / "memories.md"
         project_mem.parent.mkdir(parents=True)
         project_mem.write_text("### 项目知识\n- something", encoding="utf-8")
 
@@ -504,7 +504,7 @@ class TestConversationInjection:
         assert len(conv.history) == 2
         assert conv.history[0].content == "env info"
         assert "<system-reminder>" in conv.history[1].content
-        assert "mewcodeMd" in conv.history[1].content
+        assert "codeyxMd" in conv.history[1].content
         assert "project rules" in conv.history[1].content
         assert "autoMemory" in conv.history[1].content
         assert "user prefs" in conv.history[1].content
@@ -522,7 +522,7 @@ class TestConversationInjection:
         conv.inject_long_term_memory("rules", "")
         assert len(conv.history) == 1
         assert "<system-reminder>" in conv.history[0].content
-        assert "mewcodeMd" in conv.history[0].content
+        assert "codeyxMd" in conv.history[0].content
         assert "rules" in conv.history[0].content
 
     def test_inject_memories_only(self) -> None:
@@ -552,7 +552,7 @@ class TestConversationInjection:
 
 class TestMemoryExtraction:
     def test_extraction_prompt_contains_categories(self, tmp_path: Path) -> None:
-        from mewcode.memory.auto_memory import MEMORY_EXTRACTION_PROMPT
+        from codeyx.memory.auto_memory import MEMORY_EXTRACTION_PROMPT
 
         assert "用户偏好" in MEMORY_EXTRACTION_PROMPT
         assert "纠正反馈" in MEMORY_EXTRACTION_PROMPT
