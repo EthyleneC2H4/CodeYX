@@ -70,6 +70,16 @@ class MemoryEntry:
     body: str
 
 
+@dataclass(frozen=True)
+class MemorySearchResult:
+    name: str
+    type: str
+    description: str
+    path: Path
+    score: int
+    excerpt: str
+
+
 class MemoryManager:
     def __init__(self, project_root: str) -> None:
         self._user_path = Path.home() / USER_MEMORIES_RELPATH
@@ -300,6 +310,80 @@ class MemoryManager:
                 chunks.append(f"{header}\n{entry.body}")
 
         return "\n\n".join(chunks)
+
+
+    def catalog(self) -> list[MemoryEntry]:
+        entries: list[MemoryEntry] = []
+        for directory in (self._user_dir, self._project_dir):
+            if not directory.is_dir():
+                continue
+            for entry_path in sorted(directory.glob("*.md")):
+                if entry_path.name == MEMORY_INDEX_FILENAME:
+                    continue
+                entry = self._parse_memory_entry(entry_path)
+                if entry is not None:
+                    entries.append(entry)
+        return entries
+
+
+    def search(self, query: str, limit: int = 5) -> list[MemorySearchResult]:
+        normalized = query.strip().lower()
+        if not normalized:
+            return []
+        terms = [t for t in normalized.replace("_", "-").split() if t]
+        results: list[MemorySearchResult] = []
+        for entry in self.catalog():
+            haystack = "\n".join([
+                entry.name,
+                entry.type,
+                entry.description,
+                entry.body,
+            ]).lower()
+            score = 0
+            if normalized == entry.name.lower():
+                score += 100
+            elif normalized in entry.name.lower():
+                score += 50
+            if normalized in entry.description.lower():
+                score += 35
+            if normalized in entry.body.lower():
+                score += 25
+            score += sum(8 for term in terms if term in haystack)
+            if score <= 0:
+                continue
+            excerpt = self._make_excerpt(entry.body, terms or [normalized])
+            results.append(MemorySearchResult(
+                name=entry.name,
+                type=entry.type,
+                description=entry.description,
+                path=entry.path,
+                score=score,
+                excerpt=excerpt,
+            ))
+        results.sort(key=lambda r: (-r.score, r.name))
+        return results[:max(0, limit)]
+
+
+    @staticmethod
+    def _make_excerpt(text: str, terms: list[str], max_chars: int = 180) -> str:
+        clean = " ".join(line.strip() for line in text.splitlines() if line.strip())
+        if not clean:
+            return ""
+        lower = clean.lower()
+        first_hit = -1
+        for term in terms:
+            idx = lower.find(term.lower())
+            if idx != -1 and (first_hit == -1 or idx < first_hit):
+                first_hit = idx
+        if first_hit == -1:
+            return clean[:max_chars]
+        start = max(0, first_hit - max_chars // 3)
+        excerpt = clean[start:start + max_chars]
+        if start > 0:
+            excerpt = "..." + excerpt
+        if start + max_chars < len(clean):
+            excerpt += "..."
+        return excerpt
 
 
     @staticmethod

@@ -259,6 +259,8 @@ class Agent:
         self._extracting = False
         self.active_skills: dict[str, str] = {}
         self._skill_catalog: str = ""
+        self._skill_loader: Any = None
+        self._last_skill_recommendation_query: str = ""
         self._agent_catalog: str = ""
         self._agent_catalog_list: list[tuple[str, str]] = []
         self.agent_id: str = uuid.uuid4().hex[:12]
@@ -307,6 +309,10 @@ class Agent:
         self._skill_catalog = catalog
 
 
+    def set_skill_loader(self, loader: Any) -> None:
+        self._skill_loader = loader
+
+
     def set_agent_catalog(self, catalog: str, catalog_list: list[tuple[str, str]] | None = None) -> None:
         self._agent_catalog = catalog
         if catalog_list is not None:
@@ -338,6 +344,40 @@ class Agent:
             for n in self.hook_engine.drain_notifications()
         ]
 
+    def _latest_user_query(self, conversation: ConversationManager) -> str:
+        for msg in reversed(conversation.history):
+            if msg.role != "user" or msg.tool_results:
+                continue
+            content = msg.content.strip()
+            if not content or content.startswith("<system-reminder>"):
+                continue
+            return content
+        return ""
+
+    def _inject_skill_recommendations(self, conversation: ConversationManager) -> None:
+        if self._skill_loader is None:
+            return
+        query = self._latest_user_query(conversation)
+        if not query or query == self._last_skill_recommendation_query:
+            return
+        matches = [
+            match for match in self._skill_loader.discover(query, limit=3)
+            if match.name not in self.active_skills
+        ]
+        self._last_skill_recommendation_query = query
+        if not matches:
+            return
+        lines = [
+            "The user's request appears to match these Skills. "
+            "If one is relevant, call LoadSkill before continuing:",
+        ]
+        for match in matches:
+            lines.append(
+                f"- {match.name}: {match.description} "
+                f"(score={match.score}, source={match.source}, reason={match.reason})"
+            )
+        conversation.add_system_reminder("\n".join(lines))
+
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
         env_context = build_environment_context(
@@ -347,6 +387,7 @@ class Agent:
 
         memory_content = self.memory_manager.load() if self.memory_manager else ""
         conversation.inject_long_term_memory(self.instructions_content, memory_content)
+        self._inject_skill_recommendations(conversation)
 
         if self.hook_engine:
             ctx = self._build_hook_context("session_start")
@@ -395,6 +436,7 @@ class Agent:
                 conversation.inject_long_term_memory(
                     self.instructions_content, mem
                 )
+                self._inject_skill_recommendations(conversation)
             elif isinstance(compact_result, str):
                 yield ErrorEvent(message=compact_result)
 
@@ -880,6 +922,7 @@ class Agent:
             conversation.inject_long_term_memory(
                 self.instructions_content, memory_content
             )
+            self._inject_skill_recommendations(conversation)
             return CompactNotification(
                 before_tokens=result.before_tokens,
                 message=f"上下文已压缩（压缩前 {result.before_tokens:,} tokens）",
@@ -905,6 +948,7 @@ class Agent:
 
         if task:
             conversation.add_user_message(task)
+        self._inject_skill_recommendations(conversation)
 
         hook_prompts = (
             self.hook_engine.get_prompt_messages() if self.hook_engine else None

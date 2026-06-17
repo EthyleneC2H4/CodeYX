@@ -513,6 +513,36 @@ class TestMemoryManager:
         assert "item 0" in result
         assert "item 259" not in result
 
+    def test_catalog_and_search_directory_memory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        memory_dir = tmp_path / "project" / ".codeyx" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "testing_feedback.md").write_text(
+            "---\n"
+            "name: testing-feedback\n"
+            "type: feedback\n"
+            "description: Testing workflow preference\n"
+            "updated_at: 2026-06-17\n"
+            "confidence: high\n"
+            "---\n\n"
+            "### 纠正反馈\n- Always run pytest before pushing\n",
+            encoding="utf-8",
+        )
+
+        mgr = MemoryManager(str(tmp_path / "project"))
+        catalog = mgr.catalog()
+        assert len(catalog) == 1
+        assert catalog[0].name == "testing-feedback"
+
+        matches = mgr.search("pytest pushing")
+        assert matches
+        assert matches[0].name == "testing-feedback"
+        assert matches[0].score > 0
+        assert "pytest" in matches[0].excerpt.lower()
+
     def test_clear(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_home = tmp_path / "home"
         fake_home.mkdir()

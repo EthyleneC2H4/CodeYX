@@ -666,6 +666,7 @@ class CodeYXApp(App):
 
         load_skill_tool.set_loader(self.skill_loader)
         load_skill_tool.set_agent(self.agent)
+        self.agent.set_skill_loader(self.skill_loader)
 
         self.skill_executor = SkillExecutor(
             agent=self.agent,

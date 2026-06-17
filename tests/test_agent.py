@@ -116,6 +116,42 @@ async def test_single_step_tool_call():
     assert c["loop"][0].total_turns == 2
 
 @pytest.mark.asyncio
+async def test_skill_discovery_injects_recommendation():
+    """Agent recommends matching skills before the LLM call."""
+    from codeyx.skills.loader import SkillMatch
+
+    client = MockLLMClient([
+        [
+            TextDelta("I will use the right workflow."),
+            StreamEnd("end_turn", input_tokens=10, output_tokens=10),
+        ],
+    ])
+    registry = create_default_registry()
+    agent = Agent(client, registry, "anthropic", work_dir=".")
+    loader = type("Loader", (), {})()
+    loader.discover = lambda query, limit=3: [
+        SkillMatch(
+            name="diagnose-tests",
+            description="Investigate test failures",
+            score=64,
+            source="project",
+            reason="terms: tests",
+        )
+    ]
+    agent.set_skill_loader(loader)
+
+    conv = ConversationManager()
+    conv.add_user_message("debug these flaky tests")
+
+    events = []
+    async for e in agent.run(conv):
+        events.append(e)
+
+    reminders = [m.content for m in conv.history if "LoadSkill" in m.content]
+    assert reminders
+    assert "diagnose-tests" in reminders[0]
+
+@pytest.mark.asyncio
 async def test_multi_step_autonomous():
     """Agent does WriteFile then ReadFile then stops — end-to-end multi-step."""
     client = MockLLMClient([

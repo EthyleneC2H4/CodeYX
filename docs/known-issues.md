@@ -20,13 +20,13 @@
 Phase 4 Memory / Skills / Context 产品化后，相关模块测试已通过：
 
 ```bash
-.venv/bin/python -m pytest tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py
+.venv/bin/python -m pytest tests/test_agent.py tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py
 ```
 
 结果：
 
 ```text
-163 passed
+183 passed
 ```
 
 覆盖范围：
@@ -37,7 +37,9 @@ Phase 4 Memory / Skills / Context 产品化后，相关模块测试已通过：
 - 旧版 `.codeyx/memories.md` 兼容
 - Skill `when_to_use` 元数据解析
 - Skill discovery 检索评分
+- Agent 自动注入 Skill 推荐提醒
 - `/skill search` 命令入口
+- `/memory catalog` 和 `/memory search` 命令入口
 - Context recovery snapshot 过期清理
 
 Phase 3 Permission / Security 增强后，权限与安全测试已通过：
@@ -487,8 +489,10 @@ tests/test-summary.md
 - 自动记忆写入继续保留旧版 `.codeyx/memories.md`，同时生成目录型 memory 文件，保持兼容。
 - Skill frontmatter 增加 `when_to_use` / `whenToUse`，`SkillLoader.discover()` 支持按名称、描述、触发条件检索评分。
 - `/skill search <query>` 暴露 Skill discovery 能力。
+- Agent 启动 LLM 调用前会根据最新用户输入自动发现相关 Skill，并通过 system reminder 建议模型调用 `LoadSkill`。
+- Memory 增加 `catalog()` 和 `search()`，支持按目录型 memory 的 frontmatter/body 检索，并通过 `/memory catalog`、`/memory search <query>` 暴露。
 - Context `RecoveryState` 增加过期快照清理，compact recovery attachment 渲染前自动 prune stale file / skill snapshots。
-- 通过验证：`tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py` 共 `163 passed`。
+- 通过验证：`tests/test_agent.py tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py` 共 `183 passed`。
 
 ### 2026-06-17
 

@@ -458,6 +458,62 @@ class TestMemoryHandler:
         assert "清空" in ui.messages[0]
 
     @pytest.mark.asyncio
+    async def test_memory_catalog(self) -> None:
+        from pathlib import Path
+
+        from codeyx.commands.handlers.memory import handle_memory
+        from codeyx.memory.auto_memory import MemoryEntry
+
+        ui = MockUI()
+        mm = MagicMock()
+        mm.catalog.return_value = [
+            MemoryEntry(
+                path=Path("/tmp/project.md"),
+                name="project-knowledge",
+                type="project",
+                description="Project facts",
+                updated_at="2026-06-17",
+                confidence="high",
+                body="### 项目知识\n- uses pytest",
+            )
+        ]
+        ctx = _make_context(args="catalog", ui=ui)
+        ctx.memory_manager = mm
+
+        await handle_memory(ctx)
+
+        assert "project-knowledge" in ui.messages[0]
+        assert "Project facts" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_memory_search(self) -> None:
+        from pathlib import Path
+
+        from codeyx.commands.handlers.memory import handle_memory
+        from codeyx.memory.auto_memory import MemorySearchResult
+
+        ui = MockUI()
+        mm = MagicMock()
+        mm.search.return_value = [
+            MemorySearchResult(
+                name="testing-feedback",
+                type="feedback",
+                description="Testing preferences",
+                path=Path("/tmp/testing.md"),
+                score=41,
+                excerpt="always run pytest before pushing",
+            )
+        ]
+        ctx = _make_context(args="search pytest", ui=ui)
+        ctx.memory_manager = mm
+
+        await handle_memory(ctx)
+
+        mm.search.assert_called_once_with("pytest")
+        assert "testing-feedback" in ui.messages[0]
+        assert "score=41" in ui.messages[0]
+
+    @pytest.mark.asyncio
     async def test_memory_no_manager(self) -> None:
         from codeyx.commands.handlers.memory import handle_memory
 
