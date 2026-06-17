@@ -15,7 +15,6 @@ from codeyx.client import LLMClient
 from codeyx.context import (
     CompactCircuitBreaker,
     CompactEvent,
-    ContentReplacementRecord,
     ContentReplacementState,
     RecoveryState,
     append_replacement_records,
@@ -23,20 +22,23 @@ from codeyx.context import (
     auto_compact,
     create_replacement_state,
     ensure_session_dir,
-    load_replacement_records,
-    reconstruct_replacement_state,
 )
 from codeyx.conversation import ConversationManager, ToolResultBlock, ToolUseBlock
 from codeyx.conversation import ThinkingBlock as ConvThinkingBlock
-from codeyx.memory.auto_memory import MemoryManager
+from codeyx.hooks import HookContext, HookEngine
 from codeyx.permissions import (
-    Decision,
     PermissionChecker,
     PermissionMode,
 )
-from codeyx.hooks import HookContext, HookEngine, ToolRejectedError
-from codeyx.hooks.engine import HookNotification
 from codeyx.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
+from codeyx.memory.auto_memory import MemoryManager
+from codeyx.runtime import (
+    AgentRuntimeState,
+    ToolExecutionResult,
+    ToolExecutionScheduler,
+    ToolResultRecovery,
+    partition_tool_calls,
+)
 from codeyx.tools import ToolRegistry
 from codeyx.tools.base import (
     MAX_OUTPUT_CHARS,
@@ -213,78 +215,6 @@ class StreamCollector:
 
 
 # ---------------------------------------------------------------------------
-# Tool batch execution
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ToolBatch:
-    concurrent: bool
-    calls: list[ToolCallComplete]
-
-
-def partition_tool_calls(
-    tool_calls: list[ToolCallComplete],
-    registry: ToolRegistry,
-) -> list[ToolBatch]:
-    batches: list[ToolBatch] = []
-    for tc in tool_calls:
-        tool = registry.get(tc.tool_name)
-        safe = tool is not None and tool.is_concurrency_safe and registry.is_enabled(tc.tool_name)
-
-        if safe and batches and batches[-1].concurrent:
-            batches[-1].calls.append(tc)
-        else:
-            batches.append(ToolBatch(concurrent=safe, calls=[tc]))
-    return batches
-
-
-# ---------------------------------------------------------------------------
-# Streaming Executor — start tool execution during LLM streaming
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _ToolExecResult:
-    tool_id: str
-    tool_name: str
-    result: ToolResult
-    elapsed: float
-    is_unknown: bool
-
-
-class StreamingExecutor:
-    def __init__(self) -> None:
-        self._tasks: list[tuple[int, asyncio.Task[_ToolExecResult]]] = []
-        self._order = 0
-
-    def submit(
-        self,
-        coro: Any,
-    ) -> None:
-        task = asyncio.create_task(coro)
-        self._tasks.append((self._order, task))
-        self._order += 1
-
-    async def collect_results(self) -> list[_ToolExecResult]:
-        if not self._tasks:
-            return []
-        tasks = [t for _, t in sorted(self._tasks, key=lambda x: x[0])]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out: list[_ToolExecResult] = []
-        for r in results:
-            if isinstance(r, Exception):
-                out.append(_ToolExecResult(
-                    tool_id="",
-                    tool_name="",
-                    result=ToolResult(output=f"Tool execution error: {r}", is_error=True),
-                    elapsed=0.0,
-                    is_unknown=False,
-                ))
-            else:
-                out.append(r)
-        return out
-
-
-# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
@@ -424,13 +354,11 @@ class Agent:
             for he in self._drain_hook_events():
                 yield he
 
-        iteration = 0
-        consecutive_unknown = 0
-        max_tokens_escalated = False
-        output_recoveries = 0
+        runtime_state = AgentRuntimeState()
+        scheduler = ToolExecutionScheduler(self.registry)
 
         while True:
-            iteration += 1
+            iteration = runtime_state.next_turn()
 
             if iteration > self.max_iterations:
                 yield ErrorEvent(
@@ -550,9 +478,9 @@ class Agent:
             ]
 
             if response.stop_reason == "max_tokens":
-                if not max_tokens_escalated:
+                if not runtime_state.max_tokens_escalated:
                     self.client.set_max_output_tokens(MAX_TOKENS_CEILING)
-                    max_tokens_escalated = True
+                    runtime_state.max_tokens_escalated = True
                     if response.text:
                         conversation.add_assistant_message(
                             response.text, thinking_blocks=conv_thinking
@@ -563,8 +491,8 @@ class Agent:
                         )
                     yield RetryEvent(reason="max_tokens escalation")
                     continue
-                elif output_recoveries < MAX_OUTPUT_TOKENS_RECOVERIES:
-                    output_recoveries += 1
+                elif runtime_state.can_retry_output_tokens(MAX_OUTPUT_TOKENS_RECOVERIES):
+                    recovery_count = runtime_state.record_output_token_retry()
                     conversation.add_assistant_message(
                         response.text, thinking_blocks=conv_thinking
                     )
@@ -573,11 +501,11 @@ class Agent:
                         "Break remaining work into smaller pieces."
                     )
                     yield RetryEvent(
-                        reason=f"max_tokens recovery {output_recoveries}/{MAX_OUTPUT_TOKENS_RECOVERIES}"
+                        reason=f"max_tokens recovery {recovery_count}/{MAX_OUTPUT_TOKENS_RECOVERIES}"
                     )
                     continue
             else:
-                output_recoveries = 0
+                runtime_state.reset_output_recoveries()
 
             if not response.tool_calls:
                 conversation.add_assistant_message(
@@ -599,6 +527,25 @@ class Agent:
                 yield LoopComplete(total_turns=iteration)
                 break
 
+            malformed_tool_calls = [tc for tc in response.tool_calls if not tc.tool_id]
+            if malformed_tool_calls:
+                conversation.add_assistant_message(
+                    response.text, thinking_blocks=conv_thinking
+                )
+                for tc in malformed_tool_calls:
+                    result = ToolResultRecovery.synthetic_result(
+                        f"Malformed tool call: missing tool_use id for {tc.tool_name}"
+                    )
+                    yield ToolResultEvent(
+                        tool_id=tc.tool_id,
+                        tool_name=tc.tool_name,
+                        output=result.output,
+                        is_error=result.is_error,
+                        elapsed=0.0,
+                    )
+                yield LoopComplete(total_turns=iteration)
+                break
+
             tool_uses = [
                 ToolUseBlock(
                     tool_use_id=tc.tool_id,
@@ -612,16 +559,17 @@ class Agent:
             )
 
             tool_results: list[ToolResultBlock] = []
-            batches = partition_tool_calls(response.tool_calls, self.registry)
+            runtime_state.pending_tool_calls = list(response.tool_calls)
+            batches = scheduler.partition(response.tool_calls)
 
             for batch in batches:
                 if batch.concurrent and len(batch.calls) > 1:
-                    batch_results = await self._execute_batch_parallel(batch.calls)
+                    batch_results = await scheduler.run_parallel(
+                        batch.calls,
+                        self._execute_single_tool_direct,
+                    )
                     for br in batch_results:
-                        if br.is_unknown:
-                            consecutive_unknown += 1
-                        else:
-                            consecutive_unknown = 0
+                        runtime_state.record_tool_result(br.is_unknown)
                         content = self._maybe_persist_or_truncate(
                             br.tool_id, br.result.output
                         )
@@ -687,12 +635,11 @@ class Agent:
                                 result, elapsed, is_unknown = item
 
                         if result is None:
-                            result = ToolResult(output="Error: no result from tool", is_error=True)
+                            result = ToolResultRecovery.synthetic_result(
+                                "Error: no result from tool"
+                            )
 
-                        if is_unknown:
-                            consecutive_unknown += 1
-                        else:
-                            consecutive_unknown = 0
+                        runtime_state.record_tool_result(is_unknown)
 
                         if self.hook_engine:
                             file_path = self._infer_file_path(tc.arguments)
@@ -724,7 +671,9 @@ class Agent:
                             elapsed=elapsed,
                         )
 
-            if consecutive_unknown >= 3:
+            runtime_state.pending_tool_calls = []
+
+            if runtime_state.consecutive_unknown_tools >= 3:
                 yield ErrorEvent(
                     message="Agent terminated: too many consecutive unknown tool calls"
                 )
@@ -797,11 +746,11 @@ class Agent:
 
     async def _execute_single_tool_direct(
         self, tc: ToolCallComplete
-    ) -> _ToolExecResult:
+    ) -> ToolExecutionResult:
         start = time.monotonic()
         tool, error, is_unknown = self._resolve_tool(tc)
         if error is not None:
-            return _ToolExecResult(
+            return ToolExecutionResult(
                 tool_id=tc.tool_id,
                 tool_name=tc.tool_name,
                 result=error,
@@ -810,20 +759,13 @@ class Agent:
             )
 
         result = await self._run_tool(tool, tc)
-        return _ToolExecResult(
+        return ToolExecutionResult(
             tool_id=tc.tool_id,
             tool_name=tc.tool_name,
             result=result,
             elapsed=time.monotonic() - start,
             is_unknown=False,
         )
-
-
-    async def _execute_batch_parallel(
-        self, calls: list[ToolCallComplete]
-    ) -> list[_ToolExecResult]:
-        tasks = [self._execute_single_tool_direct(tc) for tc in calls]
-        return list(await asyncio.gather(*tasks))
 
     async def _execute_tool(
         self, tc: ToolCallComplete

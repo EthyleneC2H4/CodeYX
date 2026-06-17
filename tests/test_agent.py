@@ -417,7 +417,7 @@ async def test_plan_mode_denied_tool_returns_error():
     client = MockLLMClient([
         [
             TextDelta("Let me write..."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "x.txt", "content": "hi"}),
+            ToolCallComplete("t1", "WriteFile", {"file_path": "/etc/codeyx-plan-test", "content": "hi"}),
             StreamEnd("end_turn", input_tokens=10, output_tokens=20),
         ],
         [
