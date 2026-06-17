@@ -21,6 +21,7 @@ from codeyx.teams.models import (
     resolve_team_dir,
     unique_team_name,
 )
+from codeyx.teams.task_protocol import TaskSpec, WorkerState, WorkerStatus
 from codeyx.teams.shared_task import SharedTask, SharedTaskStore
 from codeyx.teams.mailbox import Mailbox, MailboxMessage, create_message
 from codeyx.teams.registry import AgentNameRegistry
@@ -172,6 +173,44 @@ class TestModels:
             (Path(tmp_dir) / ".codeyx" / "teams" / "my-team").mkdir(parents=True)
             name2 = unique_team_name("my-team")
             assert name2 == "my-team-2"
+
+    def test_task_spec_worker_prompt_roundtrip(self):
+        spec = TaskSpec(
+            task_id="task-1",
+            objective="Fix failing auth test",
+            constraints=["Only edit auth.py"],
+            files_scope=["auth.py", "test_auth.py"],
+            expected_output="Patch and summary",
+            verification=["pytest test_auth.py"],
+            assigned_agent="alice",
+            deadline_turns=5,
+        )
+        restored = TaskSpec.from_dict(spec.to_dict())
+        prompt = restored.to_worker_prompt()
+        assert restored.task_id == "task-1"
+        assert "Fix failing auth test" in prompt
+        assert "pytest test_auth.py" in prompt
+
+    def test_worker_status_transitions(self):
+        status = WorkerStatus(task_id="task-1", worker_id="alice")
+        status.transition(
+            WorkerState.RUNNING,
+            message="started",
+            file_scope=["auth.py"],
+            now=100.0,
+        )
+        assert status.started_at == 100.0
+        assert status.current_file_scope == ["auth.py"]
+
+        status.transition(
+            WorkerState.COMPLETED,
+            result_summary="fixed",
+            now=120.0,
+        )
+        assert status.is_terminal is True
+        restored = WorkerStatus.from_dict(status.to_dict())
+        assert restored.state == WorkerState.COMPLETED
+        assert restored.result_summary == "fixed"
 
 # =====================================================================
 # 2. SharedTaskStore

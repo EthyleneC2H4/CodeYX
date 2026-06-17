@@ -13,7 +13,11 @@ import pytest
 
 from codeyx.cache import FileCache
 from codeyx.config import WorktreeConfig, load_config
-from codeyx.worktree.changes import count_worktree_changes, has_worktree_changes
+from codeyx.worktree.changes import (
+    build_merge_preview,
+    count_worktree_changes,
+    has_worktree_changes,
+)
 from codeyx.worktree.integration import build_worktree_notice, generate_worktree_name
 from codeyx.worktree.manager import WorktreeError, WorktreeManager
 from codeyx.worktree.models import WorktreeSession
@@ -382,6 +386,39 @@ class TestChangeDetection:
         assert result.kept
         assert result.path == wt.path
         assert "auto-dirty" in manager.active
+
+class TestMergePreview:
+    def test_detects_file_level_conflict(self, git_repo):
+        loop = asyncio.get_event_loop()
+        manager = WorktreeManager(repo_root=str(git_repo), symlink_directories=[])
+        wt = loop.run_until_complete(manager.create("merge-preview"))
+        base = wt.head_commit
+
+        readme = Path(wt.path) / "README.md"
+        readme.write_text("# Worker change\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=wt.path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=t@t", "commit", "-m", "worker"],
+            cwd=wt.path,
+            capture_output=True,
+            check=True,
+        )
+
+        (git_repo / "README.md").write_text("# Main change\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=git_repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=t@t", "commit", "-m", "main"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        preview = build_merge_preview(str(git_repo), wt.path, base)
+
+        assert "README.md" in preview.worker_changed_files
+        assert "README.md" in preview.target_changed_files
+        assert preview.conflict_files == ["README.md"]
+        assert preview.can_merge_cleanly is False
 
 # =========================================================================
 # D4. read_worktree_head_sha

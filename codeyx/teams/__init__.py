@@ -10,6 +10,7 @@ from codeyx.teams.models import (
 )
 from codeyx.teams.registry import AgentNameRegistry
 from codeyx.teams.shared_task import SharedTask, SharedTaskStore
+from codeyx.teams.task_protocol import TaskSpec, WorkerState, WorkerStatus
 
 
 __all__ = [
@@ -20,9 +21,11 @@ __all__ = [
     "MailboxMessage",
     "SharedTask",
     "SharedTaskStore",
+    "TaskSpec",
     "TeammateInfo",
+    "WorkerState",
+    "WorkerStatus",
     "create_message",
     "resolve_team_dir",
     "unique_team_name",
 ]
-

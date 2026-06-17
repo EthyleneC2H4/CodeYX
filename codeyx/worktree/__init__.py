@@ -3,6 +3,8 @@
 from codeyx.worktree.changes import (
     Changes,
     CleanupResult,
+    MergePreview,
+    build_merge_preview,
     count_worktree_changes,
     has_worktree_changes,
 )
@@ -16,10 +18,12 @@ from codeyx.worktree.slug import flatten_slug, validate_slug
 __all__ = [
     "Changes",
     "CleanupResult",
+    "MergePreview",
     "Worktree",
     "WorktreeError",
     "WorktreeManager",
     "WorktreeSession",
+    "build_merge_preview",
     "cleanup_stale_worktrees",
     "count_worktree_changes",
     "flatten_slug",
@@ -29,4 +33,3 @@ __all__ = [
     "start_stale_cleanup_task",
     "validate_slug",
 ]
-

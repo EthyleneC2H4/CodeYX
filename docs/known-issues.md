@@ -17,6 +17,43 @@
 
 ### 已通过的核心验证
 
+Phase 5 Multi-Agent / Harness / Benchmark 强化后，新增能力测试已通过：
+
+```bash
+.venv/bin/python -m pytest tests/test_teams.py::TestModels::test_task_spec_worker_prompt_roundtrip tests/test_teams.py::TestModels::test_worker_status_transitions tests/test_worktree.py::TestMergePreview::test_detects_file_level_conflict tests/test_harness.py tests/trajectory/test_trajectory_evaluator.py
+```
+
+结果：
+
+```text
+21 passed
+```
+
+补充回归：
+
+```bash
+.venv/bin/python -m pytest tests/test_agent.py tests/test_runtime.py tests/test_teams.py tests/test_harness.py
+```
+
+结果：
+
+```text
+76 passed, 2 failed
+```
+
+失败说明：
+
+- 2 个失败均为既有 `ISSUE-003`：`tests/test_teams.py` 仍引用 `codeyx.prompts.BASE_PERSONA` 和 `PLAN_MODE_INSTRUCTIONS` 旧常量。
+- 本次 Phase 5 新增测试和相邻 Agent / Runtime / Team 大部分回归均通过。
+
+覆盖范围：
+
+- `TaskSpec` 结构化任务协议
+- `WorkerStatus` / `WorkerState` worker 状态机
+- Worktree merge preview 文件级冲突检测
+- 声明式 Agent harness 场景编排
+- Trajectory benchmark 多维评分报告
+
 Phase 4 Memory / Skills / Context 产品化后，相关模块测试已通过：
 
 ```bash
@@ -493,6 +530,17 @@ tests/test-summary.md
 - Memory 增加 `catalog()` 和 `search()`，支持按目录型 memory 的 frontmatter/body 检索，并通过 `/memory catalog`、`/memory search <query>` 暴露。
 - Context `RecoveryState` 增加过期快照清理，compact recovery attachment 渲染前自动 prune stale file / skill snapshots。
 - 通过验证：`tests/test_agent.py tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py` 共 `183 passed`。
+
+### 2026-06-17 Phase 5
+
+- 完成 Multi-Agent / Harness / Benchmark 强化。
+- 新增 `TaskSpec`，Coordinator 可以用结构化协议描述任务目标、约束、文件范围、期望输出、验证命令、分配 worker 和 deadline turns。
+- 新增 `WorkerState` / `WorkerStatus`，统一 worker 的 pending、running、waiting、completed、failed、cancelled、merged 状态和状态转移记录。
+- 新增 Worktree `MergePreview` 和 `build_merge_preview()`，合并前输出 worker diff、target diff、文件级冲突列表、diff stat 和未提交变更保护信号。
+- 新增 `tests/harness/` 声明式 Agent 场景 runner，支持 setup files、scripted LLM、tool trajectory、file change 和 command assertion。
+- 复用并验证 `TrajectoryEvaluator`，覆盖 tool selection、efficiency、error recovery、safety、overall 多维评分报告。
+- 通过验证：Phase 5 新增能力与 benchmark 测试共 `21 passed`。
+- 补充回归：`tests/test_agent.py tests/test_runtime.py tests/test_teams.py tests/test_harness.py` 中 `76 passed, 2 failed`；失败为既有 `ISSUE-003` prompts 旧常量测试漂移。
 
 ### 2026-06-17
 
