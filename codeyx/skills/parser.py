@@ -24,6 +24,7 @@ class SkillDef:
     name: str
     description: str
     prompt_body: str = ""
+    when_to_use: str = ""
     allowed_tools: list[str] = field(default_factory=list)
     mode: Literal["inline", "fork"] = "inline"
     model: str | None = None
@@ -92,6 +93,7 @@ def parse_skill_file(path: Path) -> SkillDef:
         name=meta["name"],
         description=meta["description"],
         prompt_body=body,
+        when_to_use=meta.get("when_to_use", meta.get("whenToUse", "")) or "",
         allowed_tools=meta.get("allowedTools", []),
         mode=meta.get("mode", "inline"),
         model=meta.get("model"),

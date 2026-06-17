@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from codeyx.conversation import ConversationManager, Message
+from codeyx.skills.parser import parse_frontmatter
 
 if TYPE_CHECKING:
     from codeyx.client import LLMClient
 
 USER_MEMORIES_RELPATH = ".codeyx/memories.md"
 PROJECT_MEMORIES_RELPATH = ".codeyx/memories.md"
+USER_MEMORY_DIR_RELPATH = ".codeyx/memory"
+PROJECT_MEMORY_DIR_RELPATH = ".codeyx/memory"
+MEMORY_INDEX_FILENAME = "MEMORY.md"
+MEMORY_INDEX_MAX_LINES = 200
+MEMORY_INDEX_MAX_BYTES = 16_384
+MEMORY_ENTRY_MAX_BYTES = 24_576
 
 MEMORY_EXTRACTION_PROMPT = """\
 你是一个记忆提取助手。分析下面的对话，提取值得长期记忆的信息，更新 memories.md。
@@ -42,11 +51,31 @@ MEMORY_EXTRACTION_PROMPT = """\
 _USER_LEVEL_HEADERS = {"用户偏好", "纠正反馈"}
 _PROJECT_LEVEL_HEADERS = {"项目知识", "参考资料"}
 
+_SECTION_FILES = {
+    "用户偏好": ("user_preferences.md", "user", "用户编码习惯、交互偏好和输出风格偏好"),
+    "纠正反馈": ("correction_feedback.md", "feedback", "用户明确纠正过的错误和正确做法"),
+    "项目知识": ("project_knowledge.md", "project", "当前项目长期有效的工程事实"),
+    "参考资料": ("references.md", "reference", "用户提供或项目相关的外部资料"),
+}
+
+
+@dataclass
+class MemoryEntry:
+    path: Path
+    name: str
+    type: str
+    description: str
+    updated_at: str
+    confidence: str
+    body: str
+
 
 class MemoryManager:
     def __init__(self, project_root: str) -> None:
         self._user_path = Path.home() / USER_MEMORIES_RELPATH
         self._project_path = Path(project_root) / PROJECT_MEMORIES_RELPATH
+        self._user_dir = Path.home() / USER_MEMORY_DIR_RELPATH
+        self._project_dir = Path(project_root) / PROJECT_MEMORY_DIR_RELPATH
         self._last_extraction_msg_count = 0
 
 
@@ -59,16 +88,32 @@ class MemoryManager:
     def project_path(self) -> Path:
         return self._project_path
 
+
+    @property
+    def user_dir(self) -> Path:
+        return self._user_dir
+
+
+    @property
+    def project_dir(self) -> Path:
+        return self._project_dir
+
     def load(self) -> str:
         sections: list[str] = []
 
-        if self._user_path.exists():
-            content = self._user_path.read_text(encoding="utf-8").strip()
+        user_dir_content = self._load_memory_directory(self._user_dir, "用户级")
+        if user_dir_content:
+            sections.append(user_dir_content)
+        elif self._user_path.exists():
+            content = self._read_limited_text(self._user_path, MEMORY_ENTRY_MAX_BYTES).strip()
             if content:
                 sections.append(content)
 
-        if self._project_path.exists():
-            content = self._project_path.read_text(encoding="utf-8").strip()
+        project_dir_content = self._load_memory_directory(self._project_dir, "项目级")
+        if project_dir_content:
+            sections.append(project_dir_content)
+        elif self._project_path.exists():
+            content = self._read_limited_text(self._project_path, MEMORY_ENTRY_MAX_BYTES).strip()
             if content:
                 sections.append(content)
 
@@ -158,12 +203,136 @@ class MemoryManager:
             self._user_path.write_text(
                 "\n".join(user_sections).strip() + "\n", encoding="utf-8"
             )
+            self._write_memory_directory(self._user_dir, user_sections)
 
         if project_sections:
             self._project_path.parent.mkdir(parents=True, exist_ok=True)
             self._project_path.write_text(
                 "\n".join(project_sections).strip() + "\n", encoding="utf-8"
             )
+            self._write_memory_directory(self._project_dir, project_sections)
+
+
+    @staticmethod
+    def _read_limited_text(path: Path, max_bytes: int) -> str:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return ""
+        truncated = len(data) > max_bytes
+        raw = data[:max_bytes].decode("utf-8", errors="replace")
+        if truncated:
+            raw += "\n\n[Memory truncated: file exceeds configured byte limit]\n"
+        return raw
+
+
+    @staticmethod
+    def _limit_index_text(text: str) -> str:
+        encoded = text.encode("utf-8")
+        truncated_by_bytes = len(encoded) > MEMORY_INDEX_MAX_BYTES
+        if truncated_by_bytes:
+            text = encoded[:MEMORY_INDEX_MAX_BYTES].decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        truncated_by_lines = len(lines) > MEMORY_INDEX_MAX_LINES
+        if truncated_by_lines:
+            lines = lines[:MEMORY_INDEX_MAX_LINES]
+            text = "\n".join(lines)
+        if truncated_by_bytes or truncated_by_lines:
+            text += "\n\n[Memory index truncated: load limit reached]"
+        return text.strip()
+
+
+    @staticmethod
+    def _parse_memory_entry(path: Path) -> MemoryEntry | None:
+        raw = MemoryManager._read_limited_text(path, MEMORY_ENTRY_MAX_BYTES).strip()
+        if not raw:
+            return None
+        try:
+            meta, body = parse_frontmatter(raw)
+        except Exception:
+            meta, body = {}, raw
+        return MemoryEntry(
+            path=path,
+            name=str(meta.get("name") or path.stem),
+            type=str(meta.get("type") or "reference"),
+            description=str(meta.get("description") or ""),
+            updated_at=str(meta.get("updated_at") or ""),
+            confidence=str(meta.get("confidence") or "medium"),
+            body=body.strip(),
+        )
+
+
+    def _load_memory_directory(self, path: Path, label: str) -> str:
+        if not path.is_dir():
+            return ""
+
+        chunks: list[str] = []
+        index = path / MEMORY_INDEX_FILENAME
+        if index.is_file():
+            content = self._limit_index_text(
+                self._read_limited_text(index, MEMORY_INDEX_MAX_BYTES * 2)
+            )
+            if content:
+                chunks.append(f"[{label} Memory Index] {index}\n{content}")
+
+        entries: list[MemoryEntry] = []
+        for entry_path in sorted(path.glob("*.md")):
+            if entry_path.name == MEMORY_INDEX_FILENAME:
+                continue
+            entry = self._parse_memory_entry(entry_path)
+            if entry is not None and entry.body:
+                entries.append(entry)
+
+        for entry in entries:
+            header = (
+                f"[{label} Memory Entry] {entry.name}"
+                f" ({entry.type}, confidence={entry.confidence})"
+            )
+            details = []
+            if entry.description:
+                details.append(f"description: {entry.description}")
+            if entry.updated_at:
+                details.append(f"updated_at: {entry.updated_at}")
+            detail_text = "\n".join(details)
+            if detail_text:
+                chunks.append(f"{header}\n{detail_text}\n{entry.body}")
+            else:
+                chunks.append(f"{header}\n{entry.body}")
+
+        return "\n\n".join(chunks)
+
+
+    @staticmethod
+    def _write_memory_directory(directory: Path, sections: list[str]) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).date().isoformat()
+        index_lines = ["# Memory Index", ""]
+
+        for section in sections:
+            lines = section.splitlines()
+            if not lines:
+                continue
+            header = lines[0].removeprefix("### ").strip()
+            if header not in _SECTION_FILES:
+                continue
+            filename, memory_type, description = _SECTION_FILES[header]
+            body = "\n".join(lines).strip() + "\n"
+            file_path = directory / filename
+            name = filename.removesuffix(".md").replace("_", "-")
+            frontmatter = (
+                "---\n"
+                f"name: {name}\n"
+                f"type: {memory_type}\n"
+                f"description: {description}\n"
+                f"updated_at: {now}\n"
+                "confidence: medium\n"
+                "---\n\n"
+            )
+            file_path.write_text(frontmatter + body, encoding="utf-8")
+            index_lines.append(f"- [{header}](./{filename}) - {description}")
+
+        index_text = "\n".join(index_lines).strip() + "\n"
+        (directory / MEMORY_INDEX_FILENAME).write_text(index_text, encoding="utf-8")
 
     @staticmethod
     def _is_placeholder(line: str) -> bool:
@@ -200,17 +369,27 @@ class MemoryManager:
             self._user_path.write_text("", encoding="utf-8")
         if self._project_path.exists():
             self._project_path.write_text("", encoding="utf-8")
+        for directory in (self._user_dir, self._project_dir):
+            if directory.exists():
+                for path in directory.glob("*.md"):
+                    path.unlink(missing_ok=True)
 
     def get_display_text(self) -> str:
         parts: list[str] = []
 
+        user_dir_content = self._load_memory_directory(self._user_dir, "用户级")
+        if user_dir_content:
+            parts.append(f"[用户级目录] {self._user_dir}\n{user_dir_content}")
         if self._user_path.exists():
-            content = self._user_path.read_text(encoding="utf-8").strip()
+            content = self._read_limited_text(self._user_path, MEMORY_ENTRY_MAX_BYTES).strip()
             if content:
                 parts.append(f"[用户级] {self._user_path}\n{content}")
 
+        project_dir_content = self._load_memory_directory(self._project_dir, "项目级")
+        if project_dir_content:
+            parts.append(f"[项目级目录] {self._project_dir}\n{project_dir_content}")
         if self._project_path.exists():
-            content = self._project_path.read_text(encoding="utf-8").strip()
+            content = self._read_limited_text(self._project_path, MEMORY_ENTRY_MAX_BYTES).strip()
             if content:
                 parts.append(f"[项目级] {self._project_path}\n{content}")
 

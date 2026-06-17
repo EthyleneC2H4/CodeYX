@@ -418,6 +418,7 @@ RECOVERY_FILE_LIMIT = 5
 RECOVERY_TOKENS_PER_FILE = 5_000
 RECOVERY_SKILLS_BUDGET = 25_000
 RECOVERY_TOKENS_PER_SKILL = 5_000
+RECOVERY_MAX_AGE_SECONDS = 6 * 60 * 60
 _RECOVERY_CHARS_PER_TOKEN = 3.5
 
 
@@ -479,6 +480,30 @@ class RecoveryState:
         records.sort(key=lambda r: r.timestamp, reverse=True)
         return records
 
+    def prune(
+        self,
+        *,
+        max_age_seconds: int = RECOVERY_MAX_AGE_SECONDS,
+        max_files: int = RECOVERY_FILE_LIMIT,
+        max_skills: int = 10,
+    ) -> None:
+        """Drop stale recovery snapshots before building compact attachments."""
+        now = time.time()
+        with self._lock:
+            fresh_files = [
+                r for r in self._files.values()
+                if max_age_seconds <= 0 or now - r.timestamp <= max_age_seconds
+            ]
+            fresh_files.sort(key=lambda r: r.timestamp, reverse=True)
+            self._files = {r.path: r for r in fresh_files[:max(0, max_files)]}
+
+            fresh_skills = [
+                r for r in self._skills.values()
+                if max_age_seconds <= 0 or now - r.timestamp <= max_age_seconds
+            ]
+            fresh_skills.sort(key=lambda r: r.timestamp, reverse=True)
+            self._skills = {r.name: r for r in fresh_skills[:max(0, max_skills)]}
+
 
 def _approx_tokens(s: str) -> int:
     if not s:
@@ -519,6 +544,7 @@ def build_recovery_attachment(
     sections: list[str] = []
 
     if state is not None:
+        state.prune()
         files = state.snapshot_files(RECOVERY_FILE_LIMIT)
         if files:
             buf = ["## 最近读过的文件\n",

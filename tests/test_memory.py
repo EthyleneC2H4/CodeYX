@@ -444,6 +444,75 @@ class TestMemoryManager:
         assert "prefer spaces" in result
         assert "uses PostgreSQL" in result
 
+    def test_load_directory_memory_with_frontmatter(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        memory_dir = tmp_path / "project" / ".codeyx" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "# Memory Index\n- [项目知识](./project.md)",
+            encoding="utf-8",
+        )
+        (memory_dir / "project.md").write_text(
+            "---\n"
+            "name: api-conventions\n"
+            "type: project\n"
+            "description: API conventions\n"
+            "updated_at: 2026-06-17\n"
+            "confidence: high\n"
+            "---\n\n"
+            "### 项目知识\n- API errors use JSON envelopes\n",
+            encoding="utf-8",
+        )
+
+        mgr = MemoryManager(str(tmp_path / "project"))
+        result = mgr.load()
+        assert "Memory Index" in result
+        assert "api-conventions" in result
+        assert "confidence=high" in result
+        assert "API errors use JSON envelopes" in result
+
+    def test_memory_directory_preferred_over_legacy_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        project = tmp_path / "project"
+        legacy = project / ".codeyx" / "memories.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("### 项目知识\n- legacy fact", encoding="utf-8")
+
+        memory_dir = project / ".codeyx" / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "project.md").write_text(
+            "---\nname: fresh\ntype: project\ndescription: fresh\n---\n\n"
+            "### 项目知识\n- directory fact\n",
+            encoding="utf-8",
+        )
+
+        result = MemoryManager(str(project)).load()
+        assert "directory fact" in result
+        assert "legacy fact" not in result
+
+    def test_memory_index_load_is_limited(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        memory_dir = tmp_path / "project" / ".codeyx" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "\n".join(f"- item {i}" for i in range(260)),
+            encoding="utf-8",
+        )
+
+        result = MemoryManager(str(tmp_path / "project")).load()
+        assert "Memory index truncated" in result
+        assert "item 0" in result
+        assert "item 259" not in result
+
     def test_clear(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -490,6 +559,12 @@ class TestMemoryManager:
         assert "uses PostgreSQL" in project_content
         assert "docs at example.com" in project_content
         assert "use spaces" not in project_content
+
+        project_entry = mgr.project_dir / "project_knowledge.md"
+        assert project_entry.exists()
+        entry_content = project_entry.read_text(encoding="utf-8")
+        assert "type: project" in entry_content
+        assert "uses PostgreSQL" in entry_content
 
 # =========================================================================
 # H. Conversation inject_long_term_memory

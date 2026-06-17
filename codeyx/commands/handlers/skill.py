@@ -23,11 +23,14 @@ async def handle_skill(ctx: CommandContext) -> None:
         _handle_list(ctx, loader)
     elif subcmd == "info":
         _handle_info(ctx, loader, sub_args)
+    elif subcmd in {"search", "discover"}:
+        _handle_search(ctx, loader, sub_args)
     elif subcmd == "reload":
         await _handle_reload(ctx, loader)
     else:
         ctx.ui.add_system_message(
-            f"未知子命令：{subcmd}\n用法：/skill list | /skill info <name> | /skill reload"
+            f"未知子命令：{subcmd}\n"
+            "用法：/skill list | /skill info <name> | /skill search <query> | /skill reload"
         )
 
 
@@ -58,6 +61,7 @@ def _handle_info(ctx: CommandContext, loader: SkillLoader, name: str) -> None:
     lines = [
         f"Skill: {skill.name}",
         f"Description: {skill.description}",
+        f"WhenToUse: {skill.when_to_use or '(not specified)'}",
         f"Mode: {skill.mode}",
         f"Context: {skill.context}",
         f"Model: {skill.model or '(default)'}",
@@ -66,6 +70,25 @@ def _handle_info(ctx: CommandContext, loader: SkillLoader, name: str) -> None:
         f"Path: {skill.source_path or '(builtin)'}",
         f"Directory: {skill.is_directory}",
     ]
+    ctx.ui.add_system_message("\n".join(lines))
+
+
+def _handle_search(ctx: CommandContext, loader: SkillLoader, query: str) -> None:
+    if not query:
+        ctx.ui.add_system_message("用法：/skill search <query>")
+        return
+
+    matches = loader.discover(query)
+    if not matches:
+        ctx.ui.add_system_message(f"没有匹配的 Skill：{query}")
+        return
+
+    lines = [f"Skill 搜索结果：{query}"]
+    for match in matches:
+        lines.append(
+            f"  {match.name:<20} score={match.score:<3} "
+            f"[{match.source}] {match.description} ({match.reason})"
+        )
     ctx.ui.add_system_message("\n".join(lines))
 
 
@@ -83,7 +106,7 @@ async def _handle_reload(ctx: CommandContext, loader: SkillLoader) -> None:
 SKILL_COMMAND = Command(
     name="skill",
     description="管理 Skill 技能包",
-    usage="/skill list | /skill info <name> | /skill reload",
+    usage="/skill list | /skill info <name> | /skill search <query> | /skill reload",
     type=CommandType.LOCAL,
     handler=handle_skill,
     aliases=["skills"],

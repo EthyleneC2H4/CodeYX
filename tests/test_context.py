@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,9 @@ from codeyx.context.manager import (
     PERSISTED_TAG,
     SINGLE_RESULT_CHAR_LIMIT,
     CompactCircuitBreaker,
+    RecoveryState,
     apply_tool_result_budget,
+    build_recovery_attachment,
     build_compact_messages,
     cleanup_tool_results,
     compute_compact_threshold,
@@ -246,6 +249,36 @@ class TestBuildCompactMessages:
         assert "the summary" in msgs[0].content
         assert msgs[1].role == "assistant"
         assert "ReadFile" in msgs[1].content
+
+
+class TestRecoveryState:
+    def test_prune_removes_stale_records(self) -> None:
+        state = RecoveryState()
+        state.record_file_read("old.py", "old")
+        state.record_file_read("new.py", "new")
+        state.record_skill_invocation("old-skill", "old")
+        state.record_skill_invocation("new-skill", "new")
+
+        with state._lock:
+            state._files["old.py"].timestamp = time.time() - 10_000
+            state._skills["old-skill"].timestamp = time.time() - 10_000
+
+        state.prune(max_age_seconds=60, max_files=5, max_skills=5)
+
+        assert [r.path for r in state.snapshot_files(10)] == ["new.py"]
+        assert [r.name for r in state.snapshot_skills()] == ["new-skill"]
+
+    def test_build_recovery_attachment_prunes_before_render(self) -> None:
+        state = RecoveryState()
+        state.record_file_read("old.py", "old")
+        state.record_file_read("new.py", "new")
+        with state._lock:
+            state._files["old.py"].timestamp = time.time() - 30_000
+
+        attachment = build_recovery_attachment(state, [])
+
+        assert "new.py" in attachment
+        assert "old.py" not in attachment
 
 # ---------------------------------------------------------------------------
 # Session directory management

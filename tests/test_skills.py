@@ -152,6 +152,19 @@ class TestParseSkillFile:
         assert skill.mode == "fork"
         assert skill.context == "none"
 
+    def test_when_to_use_frontmatter(self, tmp_path: Path) -> None:
+        f = tmp_path / "when.md"
+        f.write_text(textwrap.dedent("""\
+            ---
+            name: diagnose-tests
+            description: Debug failing tests
+            when_to_use: Use when pytest failures or flaky tests need diagnosis
+            ---
+            Diagnose the failure.
+        """))
+        skill = parse_skill_file(f)
+        assert "pytest failures" in skill.when_to_use
+
 class TestSubstituteArguments:
     def test_with_args(self) -> None:
         result = substitute_arguments("Do $ARGUMENTS now", "something cool")
@@ -312,6 +325,39 @@ class TestSkillLoader:
         loader.load_all()
         skills = loader.reload()
         assert "commit" in skills
+
+    def test_discover_by_name_description_and_when_to_use(self, tmp_path: Path) -> None:
+        skills_dir = tmp_path / ".codeyx" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "diagnose-tests.md").write_text(textwrap.dedent("""\
+            ---
+            name: diagnose-tests
+            description: Investigate pytest and CI failures
+            when_to_use: Use when tests are flaky or coverage drops
+            ---
+            Prompt
+        """))
+        (skills_dir / "docs.md").write_text(textwrap.dedent("""\
+            ---
+            name: docs
+            description: Write project documentation
+            ---
+            Prompt
+        """))
+
+        loader = SkillLoader(str(tmp_path))
+        loader.load_all()
+
+        matches = loader.discover("flaky tests")
+        assert matches
+        assert matches[0].name == "diagnose-tests"
+        assert matches[0].score > 0
+        assert "when_to_use" in matches[0].reason or "terms" in matches[0].reason
+
+    def test_discover_empty_query_returns_empty(self) -> None:
+        loader = SkillLoader("/nonexistent")
+        loader.load_all()
+        assert loader.discover("   ") == []
 
 # ---------------------------------------------------------------------------
 # Executor: filter_tool_registry

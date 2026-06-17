@@ -349,6 +349,31 @@ class TestSkillHandler:
         await handle_skill(ctx)
         assert "未知子命令" in ui.messages[0]
 
+    @pytest.mark.asyncio
+    async def test_skill_search(self) -> None:
+        from codeyx.commands.handlers.skill import handle_skill
+        from codeyx.skills.loader import SkillMatch
+
+        ui = MockUI()
+        ctx = _make_context(args="search flaky tests", ui=ui)
+        loader = MagicMock()
+        loader.discover.return_value = [
+            SkillMatch(
+                name="diagnose-tests",
+                description="Investigate pytest failures",
+                score=55,
+                source="project",
+                reason="terms: flaky, tests",
+            )
+        ]
+        ctx.config = {"skill_loader": loader}
+
+        await handle_skill(ctx)
+
+        loader.discover.assert_called_once_with("flaky tests")
+        assert "diagnose-tests" in ui.messages[0]
+        assert "score=55" in ui.messages[0]
+
 class TestStatusHandler:
 
     @pytest.mark.asyncio

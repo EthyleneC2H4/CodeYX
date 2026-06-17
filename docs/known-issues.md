@@ -17,6 +17,29 @@
 
 ### 已通过的核心验证
 
+Phase 4 Memory / Skills / Context 产品化后，相关模块测试已通过：
+
+```bash
+.venv/bin/python -m pytest tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py
+```
+
+结果：
+
+```text
+163 passed
+```
+
+覆盖范围：
+
+- Memory 目录型索引 `.codeyx/memory/MEMORY.md`
+- Memory frontmatter 元数据解析
+- Memory index / entry 加载大小限制
+- 旧版 `.codeyx/memories.md` 兼容
+- Skill `when_to_use` 元数据解析
+- Skill discovery 检索评分
+- `/skill search` 命令入口
+- Context recovery snapshot 过期清理
+
 Phase 3 Permission / Security 增强后，权限与安全测试已通过：
 
 ```bash
@@ -455,6 +478,17 @@ tests/test-summary.md
 - 修复 `ISSUE-002` 和 `ISSUE-006`。
 - 通过验证：`tests/test_permissions.py tests/security/test_command_injection.py` 共 `123 passed`。
 - 回归验证：`tests/resilience/test_error_recovery.py tests/test_agent.py tests/test_tool_search.py tests/test_runtime.py` 共 `47 passed`。
+
+### 2026-06-17 Phase 4
+
+- 完成 Memory / Skills / Context 产品化增强。
+- Memory 支持 `.codeyx/memory/` 目录型存储，`MEMORY.md` 作为索引，单项 memory 文件支持 frontmatter 元数据。
+- Memory 加载增加索引行数、索引字节数、单项文件字节数限制，超限时注入截断提示。
+- 自动记忆写入继续保留旧版 `.codeyx/memories.md`，同时生成目录型 memory 文件，保持兼容。
+- Skill frontmatter 增加 `when_to_use` / `whenToUse`，`SkillLoader.discover()` 支持按名称、描述、触发条件检索评分。
+- `/skill search <query>` 暴露 Skill discovery 能力。
+- Context `RecoveryState` 增加过期快照清理，compact recovery attachment 渲染前自动 prune stale file / skill snapshots。
+- 通过验证：`tests/test_commands.py tests/test_memory.py tests/test_skills.py tests/test_context.py` 共 `163 passed`。
 
 ### 2026-06-17
 

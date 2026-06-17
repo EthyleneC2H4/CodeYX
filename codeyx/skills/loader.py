@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from codeyx.skills.parser import SkillDef, SkillParseError, parse_frontmatter, parse_skill_file
@@ -10,6 +12,16 @@ log = logging.getLogger(__name__)
 
 PROJECT_SKILLS_DIR = ".codeyx/skills"
 USER_SKILLS_DIR = "~/.codeyx/skills"
+_WORD_RE = re.compile(r"[a-zA-Z0-9_\-\u4e00-\u9fff]+")
+
+
+@dataclass(frozen=True)
+class SkillMatch:
+    name: str
+    description: str
+    score: int
+    source: str
+    reason: str
 
 
 class SkillLoader:
@@ -86,6 +98,7 @@ class SkillLoader:
                     name=meta["name"],
                     description=meta["description"],
                     prompt_body=body,
+                    when_to_use=meta.get("when_to_use", meta.get("whenToUse", "")) or "",
                     allowed_tools=meta.get("allowedTools", []),
                     mode=meta.get("mode", "inline"),
                     model=meta.get("model"),
@@ -123,6 +136,57 @@ class SkillLoader:
 
     def get_catalog(self) -> list[tuple[str, str]]:
         return [(s.name, s.description) for s in self._skills.values()]
+
+
+    def discover(self, query: str, limit: int = 5) -> list[SkillMatch]:
+        """Return skills whose name, description, or trigger text matches query."""
+        normalized = query.strip().lower()
+        if not normalized:
+            return []
+
+        terms = set(_WORD_RE.findall(normalized))
+        matches: list[SkillMatch] = []
+        for skill in self._skills.values():
+            searchable_parts = [
+                skill.name,
+                skill.description,
+                skill.when_to_use,
+            ]
+            haystack = "\n".join(searchable_parts).lower()
+            score = 0
+            reasons: list[str] = []
+
+            if normalized == skill.name.lower():
+                score += 100
+                reasons.append("name exact")
+            elif normalized in skill.name.lower():
+                score += 60
+                reasons.append("name contains")
+
+            if normalized in skill.description.lower():
+                score += 35
+                reasons.append("description phrase")
+            if skill.when_to_use and normalized in skill.when_to_use.lower():
+                score += 45
+                reasons.append("when_to_use phrase")
+
+            matched_terms = [term for term in terms if term and term in haystack]
+            if matched_terms:
+                score += len(matched_terms) * 10
+                reasons.append("terms: " + ", ".join(sorted(matched_terms)[:5]))
+
+            if score <= 0:
+                continue
+            matches.append(SkillMatch(
+                name=skill.name,
+                description=skill.description,
+                score=score,
+                source=self.get_source_label(skill.name),
+                reason="; ".join(reasons),
+            ))
+
+        matches.sort(key=lambda m: (-m.score, m.name))
+        return matches[:max(0, limit)]
 
     def reload(self) -> dict[str, SkillDef]:
         return self.load_all()
