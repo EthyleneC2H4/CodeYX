@@ -290,6 +290,9 @@ class TestPermissionChecker:
         d = self.checker.check(tool, {"command": "rm -rf /"})
         assert d.effect == "deny"
         assert "危险命令" in d.reason
+        assert d.source == "dangerous_detector"
+        assert d.risk_level == "high"
+        assert d.matched_rule is not None
 
     def test_path_outside_sandbox_denied(self) -> None:
         from codeyx.tools.read_file import ReadFile
@@ -297,6 +300,7 @@ class TestPermissionChecker:
         d = self.checker.check(tool, {"file_path": "/etc/passwd"})
         assert d.effect == "deny"
         assert "沙箱" in d.reason
+        assert d.source == "sandbox"
 
     def test_read_tool_allowed_by_default_mode(self) -> None:
         from codeyx.tools.read_file import ReadFile
@@ -305,12 +309,15 @@ class TestPermissionChecker:
         test_file.write_text("hi")
         d = self.checker.check(tool, {"file_path": str(test_file)})
         assert d.effect == "allow"
+        assert d.source == "permission_mode"
 
     def test_write_tool_asks_in_default_mode(self) -> None:
         from codeyx.tools.write_file import WriteFile
         tool = WriteFile()
         d = self.checker.check(tool, {"file_path": str(self.tmpdir / "new.txt"), "content": "hi"})
         assert d.effect == "ask"
+        assert d.source == "permission_mode"
+        assert d.risk_level == "medium"
 
     def test_bash_asks_in_default_mode(self) -> None:
         from codeyx.tools.bash import Bash
@@ -324,6 +331,7 @@ class TestPermissionChecker:
         tool = WriteFile()
         d = self.checker.check(tool, {"file_path": str(self.tmpdir / "x.txt"), "content": "hi"})
         assert d.effect == "deny"
+        assert d.source == "permission_mode"
 
     def test_bypass_mode_allows_all(self) -> None:
         from codeyx.tools.bash import Bash
@@ -355,6 +363,20 @@ class TestPermissionChecker:
         tool = Bash()
         d = checker.check(tool, {"command": "git commit -m test"})
         assert d.effect == "allow"
+        assert d.source == "rule_engine"
+        assert d.matched_rule is not None
+
+    def test_plan_mode_allows_plan_file_write(self) -> None:
+        from codeyx.tools.write_file import WriteFile
+        self.checker.mode = PermissionMode.PLAN
+        self.checker.plan_file_path = str(self.tmpdir / ".codeyx" / "plans" / "p.md")
+        tool = WriteFile()
+        d = self.checker.check(
+            tool,
+            {"file_path": self.checker.plan_file_path, "content": "# plan"},
+        )
+        assert d.effect == "allow"
+        assert d.source == "plan_mode"
 
 # ===========================================================================
 # Integration: Agent + Permission system (end-to-end)

@@ -17,6 +17,40 @@
 
 ### 已通过的核心验证
 
+Phase 3 Permission / Security 增强后，权限与安全测试已通过：
+
+```bash
+.venv/bin/python -m pytest tests/test_permissions.py tests/security/test_command_injection.py
+```
+
+结果：
+
+```text
+123 passed
+```
+
+补充回归：
+
+```bash
+.venv/bin/python -m pytest tests/resilience/test_error_recovery.py tests/test_agent.py tests/test_tool_search.py tests/test_runtime.py
+```
+
+结果：
+
+```text
+47 passed
+```
+
+覆盖范围：
+
+- PermissionDecision 可解释字段
+- Plan Mode 非计划写入默认拒绝
+- Plan Mode 计划文件写入例外
+- 危险命令大小写/空白/链式/间接执行检测
+- `python -c`、`perl -e`、`bash -c` 包装危险命令检测
+- 系统关键文件 `chmod 777` 检测
+- Agent 主循环回归
+
 Phase 2 Tool Use / ToolSearch 升级后，核心 Agent Runtime 与工具系统相关测试已通过：
 
 ```bash
@@ -105,9 +139,9 @@ Phase 1 Runtime 重构后，核心 Agent Runtime 相关测试已通过：
 
 ### ISSUE-001：MCP 配置结构与测试预期不一致
 
-状态：待修复  
-严重级别：P1  
-类型：配置 schema / 测试契约不一致  
+状态：待修复
+严重级别：P1
+类型：配置 schema / 测试契约不一致
 影响范围：`codeyx/config.py`, `codeyx/validator.py`, `tests/test_mcp.py`
 
 失败用例：
@@ -143,9 +177,9 @@ ConfigError: 'mcp_servers' must be a list of server configs
 
 ### ISSUE-002：Plan Mode 权限语义不一致
 
-状态：待修复  
-严重级别：P1  
-类型：权限模型 / 测试契约不一致  
+状态：已修复（2026-06-17 Phase 3）
+严重级别：P1
+类型：权限模型 / 测试契约不一致
 影响范围：`codeyx/permissions/modes.py`, `codeyx/permissions/checker.py`, `tests/test_permissions.py`
 
 失败用例：
@@ -170,20 +204,20 @@ assert mode_decide(PermissionMode.PLAN, "write") == "deny"
 
 建议修复：
 
-- 在 `PermissionChecker.check()` 中明确 Plan Mode 语义：
+- 已在 `PermissionChecker.check()` 中明确 Plan Mode 语义：
   - 允许读/search/计划文件写入
   - 非计划文件写入直接 deny
-  - Bash 等行动工具直接 deny 或严格 ask，需明确文档
-- 同步更新 `mode_decide()` 和测试预期。
-- 确保 `/plan` 阶段不会卡在 UI permission future。
+  - Bash 等行动工具在 mode matrix 中直接 deny
+- 已同步更新 `mode_decide()` 和测试。
+- 已新增计划文件写入例外测试。
 
 ---
 
 ### ISSUE-003：prompts 模块测试引用了已不存在的旧常量
 
-状态：待修复  
-严重级别：P2  
-类型：测试与实现漂移  
+状态：待修复
+严重级别：P2
+类型：测试与实现漂移
 影响范围：`codeyx/prompts.py`, `tests/test_teams.py`
 
 失败用例：
@@ -215,9 +249,9 @@ ImportError: cannot import name 'PLAN_MODE_INSTRUCTIONS' from 'codeyx.prompts'
 
 ### ISSUE-004：WorktreeManager 构造参数与测试不一致
 
-状态：待修复  
-严重级别：P1  
-类型：API 契约不一致  
+状态：待修复
+严重级别：P1
+类型：API 契约不一致
 影响范围：`codeyx/worktree/manager.py`, `tests/test_worktree.py`
 
 失败用例：
@@ -250,9 +284,9 @@ TypeError: WorktreeManager.__init__() got an unexpected keyword argument 'file_c
 
 ### ISSUE-005：Hook 全量测试存在长时间等待或任务泄漏
 
-状态：待定位  
-严重级别：P1  
-类型：异步任务生命周期 / 测试稳定性  
+状态：待定位
+严重级别：P1
+类型：异步任务生命周期 / 测试稳定性
 影响范围：`codeyx/hooks/engine.py`, `tests/test_hooks.py`
 
 现象：
@@ -279,9 +313,9 @@ task: <Task cancelling ... HookEngine._run_single() ...>
 
 ### ISSUE-006：危险命令检测存在间接执行绕过
 
-状态：待修复  
-严重级别：P0  
-类型：安全检测缺口  
+状态：已修复（2026-06-17 Phase 3）
+严重级别：P0
+类型：安全检测缺口
 影响范围：`codeyx/permissions/dangerous.py`, `tests/security/test_command_injection.py`
 
 失败用例：
@@ -307,29 +341,29 @@ Permission escalation missed
 
 建议修复：
 
-- 对命令做大小写归一化和基础 shell tokenization。
-- 增加解释器间接执行检测：
+- 已对命令做空白归一化和基础 shell tokenization。
+- 已增加解释器间接执行检测：
   - `python -c`
   - `perl -e`
   - `ruby -e`
   - `node -e`
   - `bash -c`
   - `sh -c`
-- 检测字符串中的二级危险命令。
-- 增加关键系统文件权限修改规则：
+- 已支持递归检测包装命令中的二级危险命令。
+- 已增加关键系统文件权限修改规则：
   - `/etc/passwd`
   - `/etc/shadow`
   - `/etc/sudoers`
   - `/boot/*`
-- 该问题应优先于功能优化修复。
+- 验证结果：`tests/security/test_command_injection.py` 全部通过。
 
 ---
 
 ### ISSUE-007：Context 性能测试与当前预算策略不一致
 
-状态：待定位  
-严重级别：P2  
-类型：性能测试 / 预算策略不一致  
+状态：待定位
+严重级别：P2
+类型：性能测试 / 预算策略不一致
 影响范围：`codeyx/context/manager.py`, `tests/perf/test_context_perf.py`
 
 失败用例：
@@ -360,9 +394,9 @@ assert len(records) > 0
 
 ### ISSUE-008：仓库存在未跟踪历史目录和测试文档
 
-状态：待确认  
-严重级别：P3  
-类型：仓库卫生  
+状态：待确认
+严重级别：P3
+类型：仓库卫生
 影响范围：Git 工作区
 
 当前未跟踪项：
@@ -389,14 +423,12 @@ tests/test-summary.md
 
 建议后续按以下顺序处理：
 
-1. `ISSUE-006`：危险命令检测绕过，安全优先。
-2. `ISSUE-002`：Plan Mode 权限语义，避免规划阶段误触发行动。
-3. `ISSUE-005`：Hook 测试卡住，影响全量测试稳定性。
-4. `ISSUE-001`：MCP 配置 schema，影响外部工具接入。
-5. `ISSUE-004`：WorktreeManager API，影响多 Agent 隔离执行。
-6. `ISSUE-003`：prompts 旧常量测试漂移。
-7. `ISSUE-007`：Context 性能测试策略。
-8. `ISSUE-008`：仓库未跟踪文件清理。
+1. `ISSUE-005`：Hook 测试卡住，影响全量测试稳定性。
+2. `ISSUE-001`：MCP 配置 schema，影响外部工具接入。
+3. `ISSUE-004`：WorktreeManager API，影响多 Agent 隔离执行。
+4. `ISSUE-003`：prompts 旧常量测试漂移。
+5. `ISSUE-007`：Context 性能测试策略。
+6. `ISSUE-008`：仓库未跟踪文件清理。
 
 ---
 
@@ -412,7 +444,17 @@ tests/test-summary.md
 - MCP 工具命名已统一为 `mcp__<server>__<tool>`，修复此前 wrapper 与 ToolFilter/App 识别规则不一致的问题。
 - Agent 大工具结果持久化时会回填 `ToolResult.persisted_path`、`display_hint` 和 `metadata.original_chars`。
 - 通过验证：`49 passed`。
-- 当前未解决问题仍包括 MCP 配置 schema、Plan Mode 权限语义、Hook 长用例、危险命令检测绕过、WorktreeManager 构造参数等。
+- 当时未解决问题包括 MCP 配置 schema、Plan Mode 权限语义、Hook 长用例、危险命令检测绕过、WorktreeManager 构造参数等；其中 Plan Mode 权限语义和危险命令检测绕过已在 Phase 3 修复。
+
+### 2026-06-17 Phase 3
+
+- 完成 Permission / Security 增强。
+- `Decision` 增加 `source`、`risk_level`、`matched_rule`、`details`，权限结果可解释性增强。
+- Plan Mode 权限矩阵改为默认拒绝 write/command，计划文件写入通过 Layer 0 特例放行。
+- 危险命令检测增加空白归一化、shell tokenization、解释器间接执行、shell `-c` 包装检测和关键系统文件 `chmod 777` 检测。
+- 修复 `ISSUE-002` 和 `ISSUE-006`。
+- 通过验证：`tests/test_permissions.py tests/security/test_command_injection.py` 共 `123 passed`。
+- 回归验证：`tests/resilience/test_error_recovery.py tests/test_agent.py tests/test_tool_search.py tests/test_runtime.py` 共 `47 passed`。
 
 ### 2026-06-17
 
