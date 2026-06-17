@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel
 
 from codeyx.tools import ToolRegistry
-from codeyx.tools.base import Tool, ToolResult
+from codeyx.tools.base import Tool, ToolMetadata, ToolResult
 from codeyx.tools.impl.tool_search import ToolSearchTool
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,7 @@ class _DeferredBeta(Tool):
     params_model = _DummyParams
     category = "read"
     should_defer = True
+    metadata = ToolMetadata(tags=("beta-tag", "analysis"))
 
     async def execute(self, params: BaseModel) -> ToolResult:
         return ToolResult(output="deferred beta ok")
@@ -95,6 +96,38 @@ def test_deferred_not_in_schemas():
     assert "NormalTool" in names
     assert "DeferredAlpha" not in names
     assert "DeferredBeta" not in names
+
+def test_tool_search_disabled_exposes_deferred_schemas():
+    """Disabled ToolSearch mode falls back to exposing deferred schemas inline."""
+    reg = ToolRegistry(tool_search_mode="disabled")
+    reg.register(_NormalTool())
+    reg.register(_DeferredTool())
+
+    names = {s["name"] for s in reg.get_all_schemas()}
+
+    assert "NormalTool" in names
+    assert "DeferredAlpha" in names
+    assert reg.get_deferred_tool_names() == []
+
+def test_tool_search_auto_uses_schema_size_threshold():
+    """Auto mode only defers when estimated schema size crosses the threshold."""
+    low = ToolRegistry(
+        tool_search_mode="auto",
+        tool_search_threshold_percent=50,
+        context_window=200_000,
+    )
+    low.register(_DeferredTool())
+    assert not low.should_use_tool_search_auto()
+    assert "DeferredAlpha" in {s["name"] for s in low.get_all_schemas()}
+
+    high = ToolRegistry(
+        tool_search_mode="auto",
+        tool_search_threshold_percent=1,
+        context_window=100,
+    )
+    high.register(_DeferredTool())
+    assert high.should_use_tool_search_auto()
+    assert "DeferredAlpha" not in {s["name"] for s in high.get_all_schemas()}
 
 @pytest.mark.asyncio
 async def test_tool_search_marks_discovered():
@@ -154,6 +187,22 @@ async def test_tool_search_keyword():
     from codeyx.tools.impl.tool_search import ToolSearchParams
 
     params = ToolSearchParams(query="beta", max_results=5)
+    result = await search.execute(params)
+
+    assert not result.is_error
+    assert "DeferredBeta" in result.output
+    assert reg.is_discovered("DeferredBeta")
+
+@pytest.mark.asyncio
+async def test_tool_search_matches_metadata_tags():
+    """ToolSearch should search tool metadata tags as well as name/description."""
+    reg = _make_registry()
+    search = ToolSearchTool(reg, protocol="anthropic")
+    reg.register(search)
+
+    from codeyx.tools.impl.tool_search import ToolSearchParams
+
+    params = ToolSearchParams(query="beta-tag", max_results=5)
     result = await search.execute(params)
 
     assert not result.is_error

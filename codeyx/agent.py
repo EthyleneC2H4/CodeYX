@@ -571,7 +571,7 @@ class Agent:
                     for br in batch_results:
                         runtime_state.record_tool_result(br.is_unknown)
                         content = self._maybe_persist_or_truncate(
-                            br.tool_id, br.result.output
+                            br.tool_id, br.result
                         )
                         tool_results.append(
                             ToolResultBlock(
@@ -610,7 +610,7 @@ class Agent:
                                     is_error=True,
                                 )
                                 content = self._maybe_persist_or_truncate(
-                                    tc.tool_id, result.output
+                                    tc.tool_id, result
                                 )
                                 tool_results.append(
                                     ToolResultBlock(
@@ -654,7 +654,7 @@ class Agent:
                                 yield he
 
                         content = self._maybe_persist_or_truncate(
-                            tc.tool_id, result.output
+                            tc.tool_id, result
                         )
                         tool_results.append(
                             ToolResultBlock(
@@ -997,7 +997,7 @@ class Agent:
             tool_results: list[ToolResultBlock] = []
             for tc in response.tool_calls:
                 result = await self._execute_tool_noninteractive(tc)
-                content = self._maybe_persist_or_truncate(tc.tool_id, result.output)
+                content = self._maybe_persist_or_truncate(tc.tool_id, result)
                 tool_results.append(
                     ToolResultBlock(
                         tool_use_id=tc.tool_id,
@@ -1066,16 +1066,28 @@ class Agent:
 
         return result
 
-    def _maybe_persist_or_truncate(self, tool_use_id: str, text: str) -> str:
+    def _maybe_persist_or_truncate(self, tool_use_id: str, result: ToolResult | str) -> str:
         from codeyx.context.manager import (
             SINGLE_RESULT_CHAR_LIMIT,
             make_persisted_preview,
             persist_tool_result,
         )
 
+        if isinstance(result, ToolResult):
+            text = result.output
+        else:
+            text = result
+
         if len(text) > SINGLE_RESULT_CHAR_LIMIT:
             fp = persist_tool_result(tool_use_id, text, self.session_dir)
+            if isinstance(result, ToolResult):
+                result.persisted_path = str(fp)
+                result.display_hint = "persisted_preview"
+                result.metadata["original_chars"] = len(text)
             return make_persisted_preview(text, fp)
         if len(text) > MAX_OUTPUT_CHARS:
+            if isinstance(result, ToolResult):
+                result.display_hint = "truncated"
+                result.metadata["original_chars"] = len(text)
             return text[:MAX_OUTPUT_CHARS] + "\n… (output truncated)"
         return text

@@ -6,7 +6,7 @@ from mcp import types as mcp_types
 from pydantic import BaseModel, create_model
 
 from codeyx.mcp.client import MCPClient
-from codeyx.tools.base import Tool, ToolResult
+from codeyx.tools.base import Tool, ToolMetadata, ToolResult
 
 
 def _build_params_model(
@@ -64,11 +64,17 @@ class MCPToolWrapper(Tool):
         self._server_name = server_name
         self._tool_def = tool_def
         self._client = client
-        self.name = f"mcp_{server_name}_{tool_def.name}"
+        self.name = f"mcp__{server_name}__{tool_def.name}"
         self.description = tool_def.description or tool_def.name
         self.category = "command"
         self.is_concurrency_safe = False
         self.should_defer = True
+        self.metadata = ToolMetadata(
+            source="mcp",
+            risk_level="medium",
+            requires_permission=True,
+            tags=("mcp", server_name, tool_def.name),
+        )
         self.params_model = _build_params_model(
             tool_def.name, tool_def.inputSchema
         )
@@ -94,6 +100,11 @@ class MCPToolWrapper(Tool):
                 return ToolResult(
                     output=f"MCP server '{self._server_name}' reconnect failed: {e}",
                     is_error=True,
+                    metadata={
+                        "source": "mcp",
+                        "server": self._server_name,
+                        "tool": self._tool_def.name,
+                    },
                 )
 
         try:
@@ -105,7 +116,20 @@ class MCPToolWrapper(Tool):
             return ToolResult(
                 output=f"MCP tool call failed: {e}",
                 is_error=True,
+                metadata={
+                    "source": "mcp",
+                    "server": self._server_name,
+                    "tool": self._tool_def.name,
+                },
             )
 
         text = _extract_text(result.content)
-        return ToolResult(output=text, is_error=bool(result.isError))
+        return ToolResult(
+            output=text,
+            is_error=bool(result.isError),
+            metadata={
+                "source": "mcp",
+                "server": self._server_name,
+                "tool": self._tool_def.name,
+            },
+        )

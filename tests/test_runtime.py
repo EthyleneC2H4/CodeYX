@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from codeyx.agent import Agent
+from codeyx.client import LLMClient
 from codeyx.conversation import ConversationManager, ToolUseBlock
 from codeyx.runtime import (
     AgentRuntimeState,
@@ -10,7 +12,7 @@ from codeyx.runtime import (
     partition_tool_calls,
 )
 from codeyx.tools import create_default_registry
-from codeyx.tools.base import ToolCallComplete, ToolResult
+from codeyx.tools.base import StreamEnd, TextDelta, ToolCallComplete, ToolResult
 
 
 def test_runtime_state_tracks_turns_and_unknown_tools() -> None:
@@ -122,3 +124,20 @@ def test_recovery_does_not_duplicate_existing_results() -> None:
     )
 
     assert ToolResultRecovery.missing_result_blocks(conv) == []
+
+
+def test_agent_persisted_tool_result_sets_metadata(tmp_path) -> None:
+    class _Client(LLMClient):
+        async def stream(self, conversation, system="", tools=None):
+            yield TextDelta(text="done")
+            yield StreamEnd(stop_reason="end_turn")
+
+    agent = Agent(_Client(), create_default_registry(), "anthropic", work_dir=str(tmp_path))
+    result = ToolResult(output="x" * 6000)
+
+    preview = agent._maybe_persist_or_truncate("tool-1", result)
+
+    assert "<persisted-output>" in preview
+    assert result.persisted_path is not None
+    assert result.display_hint == "persisted_preview"
+    assert result.metadata["original_chars"] == 6000

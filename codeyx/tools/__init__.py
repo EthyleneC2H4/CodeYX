@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from codeyx.tools.base import Tool
@@ -9,10 +10,18 @@ if TYPE_CHECKING:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        tool_search_mode: str = "always",
+        tool_search_threshold_percent: int = 10,
+        context_window: int = 200_000,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
         self._disabled: set[str] = set()
         self._discovered: set[str] = set()
+        self.tool_search_mode = tool_search_mode
+        self.tool_search_threshold_percent = tool_search_threshold_percent
+        self.context_window = context_window
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -47,10 +56,43 @@ class ToolRegistry:
         return [
             name
             for name, tool in self._tools.items()
-            if getattr(tool, "should_defer", False)
+            if self._should_defer_tool(tool)
             and name not in self._discovered
             and name not in self._disabled
         ]
+
+    def _should_defer_tool(self, tool: Tool) -> bool:
+        if not getattr(tool, "should_defer", False):
+            return False
+        if self.tool_search_mode == "disabled":
+            return False
+        if self.tool_search_mode == "always":
+            return True
+        if self.tool_search_mode == "auto":
+            return self.should_use_tool_search_auto()
+        return True
+
+    def estimate_deferred_schema_chars(self) -> int:
+        total = 0
+        for name, tool in self._tools.items():
+            if name in self._disabled or not getattr(tool, "should_defer", False):
+                continue
+            total += len(json.dumps(tool.get_schema(), ensure_ascii=False))
+        return total
+
+    def should_use_tool_search_auto(self) -> bool:
+        if self.tool_search_mode == "always":
+            return True
+        if self.tool_search_mode == "disabled":
+            return False
+        # Rough approximation used only for local routing. The API-facing token
+        # accounting still happens in the LLM provider.
+        estimated_tokens = max(1, self.estimate_deferred_schema_chars() // 4)
+        threshold = max(
+            1,
+            int(self.context_window * (self.tool_search_threshold_percent / 100)),
+        )
+        return estimated_tokens >= threshold
 
     def search_deferred(
         self, query: str, max_results: int, protocol: str = "anthropic"
@@ -58,22 +100,28 @@ class ToolRegistry:
         query_lower = query.lower()
         scored: list[tuple[int, str, Tool]] = []
         for name, tool in self._tools.items():
-            if not getattr(tool, "should_defer", False):
+            if not self._should_defer_tool(tool):
                 continue
             if name in self._disabled:
                 continue
             score = 0
             name_lower = name.lower()
             desc_lower = (tool.description or "").lower()
+            metadata = tool.get_metadata()
+            tags_lower = " ".join(metadata.tags).lower()
             if query_lower in name_lower:
                 score += 10
             if query_lower in desc_lower:
                 score += 5
+            if query_lower in tags_lower:
+                score += 4
             for word in query_lower.split():
                 if word in name_lower:
                     score += 3
                 if word in desc_lower:
                     score += 1
+                if word in tags_lower:
+                    score += 2
             if score > 0:
                 scored.append((score, name, tool))
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -99,7 +147,7 @@ class ToolRegistry:
             tool = self._tools.get(name)
             if tool is None:
                 continue
-            if not getattr(tool, "should_defer", False):
+            if not self._should_defer_tool(tool):
                 continue
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
@@ -122,7 +170,7 @@ class ToolRegistry:
         for name, tool in self._tools.items():
             if name in self._disabled:
                 continue
-            if getattr(tool, "should_defer", False) and name not in self._discovered:
+            if self._should_defer_tool(tool) and name not in self._discovered:
                 continue
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
