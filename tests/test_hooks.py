@@ -485,16 +485,26 @@ class TestHookEngine:
         await engine.run_hooks("post_tool_use", ctx)
 
     @pytest.mark.asyncio
-    async def test_async_hook_does_not_block(self):
+    async def test_async_hook_does_not_block(self, monkeypatch):
+        async def slow_action(action, ctx):
+            await asyncio.sleep(5)
+            return ActionResult(output="done", success=True)
+
+        monkeypatch.setattr("codeyx.hooks.engine.execute_action", slow_action)
         h = self._make_hook(
             id="slow",
             event="post_tool_use",
-            action=Action(type="command", command="sleep 5"),
+            action=Action(type="prompt", message="slow"),
             async_exec=True,
         )
         engine = HookEngine([h])
         ctx = HookContext(event_name="post_tool_use")
-        await engine.run_hooks("post_tool_use", ctx)
+        try:
+            start = asyncio.get_running_loop().time()
+            await engine.run_hooks("post_tool_use", ctx)
+            assert asyncio.get_running_loop().time() - start < 0.5
+        finally:
+            await engine.cancel_background_hooks()
 
 # ---------------------------------------------------------------------------
 # Agent Loop integration

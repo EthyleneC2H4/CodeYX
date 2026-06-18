@@ -22,6 +22,10 @@ async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=action.timeout
             )
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()

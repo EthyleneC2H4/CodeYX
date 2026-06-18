@@ -23,6 +23,7 @@ class HookEngine:
         self.hooks: list[Hook] = hooks or []
         self._prompt_messages: list[str] = []
         self._notifications: list[HookNotification] = []
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
 
     def find_matching_hooks(self, event: str, ctx: HookContext) -> list[Hook]:
@@ -43,7 +44,9 @@ class HookEngine:
         for hook in matched:
             hook.mark_executed()
             if hook.async_exec:
-                asyncio.ensure_future(self._run_single(hook, ctx))
+                task = asyncio.create_task(self._run_single(hook, ctx))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
             else:
                 await self._run_single(hook, ctx)
 
@@ -113,3 +116,13 @@ class HookEngine:
         notifications = list(self._notifications)
         self._notifications.clear()
         return notifications
+
+
+    async def cancel_background_hooks(self) -> None:
+        tasks = list(self._background_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()

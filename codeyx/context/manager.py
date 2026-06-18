@@ -257,10 +257,12 @@ def apply_tool_result_budget(
     """
     new_records: list[ContentReplacementRecord] = []
     new_history: list[Message] = []
+    aggregate_total = 0
 
     for msg in conversation.history:
         if not msg.tool_results:
             new_history.append(msg)
+            aggregate_total += len(msg.content)
             continue
 
         decisions: dict[str, str] = {}
@@ -298,10 +300,10 @@ def apply_tool_result_budget(
 
         # Pass 2: aggregate
         remaining = [tr for tr in fresh if tr.tool_use_id not in persisted_p1]
-        total = sum(len(c) for c in decisions.values()) + sum(
+        total = aggregate_total + sum(len(c) for c in decisions.values()) + sum(
             len(tr.content) for tr in remaining
         )
-        if total > AGGREGATE_CHAR_LIMIT:
+        if total >= AGGREGATE_CHAR_LIMIT:
             ranked = sorted(remaining, key=lambda tr: len(tr.content), reverse=True)
             for tr in ranked:
                 if total <= AGGREGATE_CHAR_LIMIT:
@@ -332,6 +334,9 @@ def apply_tool_result_budget(
             )
             for tr in msg.tool_results
         ]
+        aggregate_total += len(msg.content) + sum(
+            len(tr.content) for tr in new_tool_results
+        )
         new_history.append(_copy_message_with_results(msg, new_tool_results))
 
     # Pass 3: stale snip on the new history (stateless; out-of-scope drift accepted)

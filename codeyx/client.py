@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -113,6 +114,13 @@ class RateLimitError(LLMError):
 
 class NetworkError(LLMError):
     pass
+
+
+def _html_title(text: str) -> str:
+    match = re.search(r"<title>\s*(.*?)\s*</title>", text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()
 
 
 class LLMClient(ABC):
@@ -649,6 +657,15 @@ class DeepSeekClient(LLMClient):
             retry = None
             if hasattr(e, "response") and e.response is not None:
                 retry = e.response.headers.get("retry-after")
+                body = e.response.text or ""
+                if "<html" in body.lower():
+                    title = _html_title(body)
+                    detail = f" ({title})" if title else ""
+                    raise LLMError(
+                        "DeepSeek request was blocked by the API host"
+                        f"{detail}. Check base_url; use https://api.deepseek.com "
+                        "instead of the web console URL."
+                    ) from e
             raise RateLimitError(
                 f"DeepSeek rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
                 retry_after=float(retry) if retry else None,
