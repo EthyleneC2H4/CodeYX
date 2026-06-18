@@ -1,4 +1,4 @@
-name: CodeYX Test Suite
+name: CodeYX CI
 
 on:
   push:
@@ -6,83 +6,152 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 8 * * 1'  # Weekly integration tests on Monday 8am UTC
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeyx-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  unit:
-    name: Unit & Security Tests
+  lint:
+    name: Lint & Static Checks
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.11']
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Compile Python sources
+        run: uv run python -m compileall -q codeyx tests
+
+      - name: Critical Ruff checks
+        run: uv run ruff check codeyx tests --select E9,F63,F7 --output-format=github
+
+      - name: Full Ruff report (advisory)
+        run: |
+          mkdir -p reports
+          uv run ruff check codeyx tests --output-format=concise > reports/ruff-report.txt || true
+
+      - name: Upload Ruff report
+        uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: ruff-report
+          path: reports/ruff-report.txt
+          if-no-files-found: ignore
+
+  unit:
+    name: Unit Test Suite (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-      - name: Install dependencies
-        run: uv sync
-      - name: Run unit tests
-        run: uv run pytest tests/test_*.py tests/security/ tests/resilience/ tests/trajectory/ tests/perf/ -v --tb=short --cov=codeyx --cov-report=xml --cov-report=term-missing -m "not integration"
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage.xml
-        continue-on-error: true
 
-  lint:
-    name: Lint & Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
       - name: Install dependencies
-        run: uv sync
-      - name: Ruff check
-        run: uv run ruff check codeyx/ tests/
-        continue-on-error: true
+        run: uv sync --group dev
+
+      - name: Run unit tests
+        run: >
+          uv run pytest tests
+          -m "not integration"
+          --tb=short
+          --junitxml=reports/pytest-${{ matrix.python-version }}.xml
+          --cov=codeyx
+          --cov-report=xml:reports/coverage-${{ matrix.python-version }}.xml
+          --cov-report=term-missing
+
+      - name: Upload test reports
+        uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: test-reports-${{ matrix.python-version }}
+          path: reports/
+          if-no-files-found: ignore
 
   security:
-    name: Security Penetration Tests
+    name: Security Regression Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --group dev
+
       - name: Run security tests
-        run: uv run pytest tests/security/ -v --tb=short
+        run: uv run pytest tests/security tests/test_permissions.py -m "not integration" --tb=short
 
   integration:
     name: Integration Tests (Weekly)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    timeout-minutes: 30
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --group dev
+
       - name: Run integration tests
-        run: uv run pytest tests/ -v -m integration --tb=long
+        run: uv run pytest tests -m integration --tb=long
         continue-on-error: true
