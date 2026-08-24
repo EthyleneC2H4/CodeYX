@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
 from unittest.mock import patch
 
 import pytest
@@ -89,6 +88,18 @@ class TestHookContext:
         assert "Msg=done" in result
         assert "Err=" in result
         assert "Arg=src/main.py" in result
+
+    def test_tool_args_cannot_shadow_reserved_keys(self):
+        from codeyx.hooks.models import HookContext
+
+        ctx = HookContext(
+            event_name="post_tool_use",
+            tool_name="Bash",
+            message="real message",
+            tool_args={"MESSAGE": "ATTACKER-CONTROLLED", "TOOL_NAME": "spoofed"},
+        )
+        expanded = ctx.expand("msg=$MESSAGE tool=$TOOL_NAME")
+        assert expanded == "msg=real message tool=Bash"
 
     def test_expand_undefined_variable(self):
         ctx = HookContext()
@@ -519,7 +530,7 @@ class TestAgentHookIntegration:
         from codeyx.client import LLMClient
         from codeyx.conversation import ConversationManager
         from codeyx.tools import create_default_registry
-        from codeyx.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
+        from codeyx.tools.base import StreamEnd, TextDelta, ToolCallComplete
 
         class MockClient(LLMClient):
             def __init__(self):

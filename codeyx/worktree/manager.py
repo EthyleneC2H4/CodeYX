@@ -4,13 +4,10 @@ import asyncio
 import logging
 import os
 import subprocess
-import time
-from datetime import datetime
 from pathlib import Path
 
 from codeyx.worktree.changes import (
     CleanupResult,
-    Changes,
     count_worktree_changes,
     has_worktree_changes,
 )
@@ -239,6 +236,23 @@ class WorktreeManager:
         self._run_git(["branch", "-D", branch_name])
 
         self.active.pop(name, None)
+
+
+    async def remove_worktree(self, name: str, wt: Worktree | None = None) -> None:
+        """Public removal for cleanup paths. Handles worktrees not tracked in
+        `active` (e.g. leftovers from a previous session) via a direct git
+        removal keyed off the worktree directory."""
+        wt = wt or self.active.get(name)
+        if wt is not None:
+            await self._remove_worktree(name, wt)
+            return
+
+        path = os.path.join(self.worktree_dir, flatten_slug(name))
+        result = self._run_git(["worktree", "remove", "--force", path])
+        if result.returncode != 0:
+            log.warning("git worktree remove failed: %s", result.stderr.strip())
+        await asyncio.sleep(0.1)
+        self._run_git(["branch", "-D", f"worktree-{flatten_slug(name)}"])
 
     # ------------------------------------------------------------------
     # Auto cleanup

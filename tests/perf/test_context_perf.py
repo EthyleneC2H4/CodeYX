@@ -8,8 +8,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pytest
-
 from codeyx.context.manager import (
     SINGLE_RESULT_CHAR_LIMIT,
     apply_tool_result_budget,
@@ -21,9 +19,7 @@ from codeyx.conversation import (
     ConversationManager,
     Message,
     ToolResultBlock,
-    ToolUseBlock,
 )
-
 
 # ============================================================================
 # Context compression performance
@@ -51,10 +47,10 @@ class TestContextCompressionPerf:
         assert preview.startswith("<persisted-output>")
 
     def test_budget_apply_scales_linearly(self, tmp_path: Path):
-        """apply_tool_result_budget with 50 tool results should scale linearly."""
+        """apply_tool_result_budget with 50 oversized tool results should scale linearly."""
         state = create_replacement_state()
         conv = ConversationManager()
-        # 50 messages, each with a tool result of 2000 chars
+        # 50 messages, each over SINGLE_RESULT_CHAR_LIMIT so Pass 1 persists them
         for i in range(50):
             msg = Message(
                 role="user",
@@ -62,7 +58,7 @@ class TestContextCompressionPerf:
                 tool_results=[
                     ToolResultBlock(
                         tool_use_id=f"t{i}",
-                        content="x" * 2000,
+                        content="x" * (SINGLE_RESULT_CHAR_LIMIT + 1000),
                         is_error=False,
                     )
                 ],
@@ -74,7 +70,7 @@ class TestContextCompressionPerf:
         elapsed = (time.perf_counter() - start) * 1000
         # Should complete in under 200ms for 50 results
         assert elapsed < 500, f"apply_tool_result_budget(50) took {elapsed:.0f}ms"
-        assert len(records) > 0  # Some results should have been persisted
+        assert len(records) > 0  # Oversized results must be persisted
 
 
 class TestLargeToolResult:

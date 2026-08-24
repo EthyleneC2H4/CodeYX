@@ -5,9 +5,10 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from codeyx.conversation import ConversationManager, Message, ToolResultBlock
 
@@ -311,6 +312,10 @@ def apply_tool_result_budget(
                 fp = persist_tool_result(tr.tool_use_id, tr.content, session_dir)
                 preview = make_persisted_preview(tr.content, fp)
                 old_len = len(tr.content)
+                if len(preview) >= old_len:
+                    # Preview embeds up to PREVIEW_CHARS plus tag overhead;
+                    # replacing a small result would grow the payload.
+                    continue
                 decisions[tr.tool_use_id] = preview
                 state.replacements[tr.tool_use_id] = preview
                 state.seen_ids.add(tr.tool_use_id)
@@ -545,11 +550,13 @@ def build_recovery_attachment(
     summary message clean. `tool_schemas` is expected to be the schemas
     the agent will send on the next request — names + descriptions are
     used to remind the model what's wired up.
+
+    Does not mutate `state`; stale-snapshot pruning is the caller's job
+    (auto_compact prunes right before rendering).
     """
     sections: list[str] = []
 
     if state is not None:
-        state.prune()
         files = state.snapshot_files(RECOVERY_FILE_LIMIT)
         if files:
             buf = ["## 最近读过的文件\n",
@@ -692,7 +699,7 @@ async def auto_compact(
 
     for attempt in range(max_retries):
         try:
-            from codeyx.tools.base import StreamEnd, StreamEvent, TextDelta
+            from codeyx.tools.base import StreamEnd, TextDelta
 
             collected_text = ""
             async for event in client.stream(summary_conv, system=SUMMARY_PROMPT):
@@ -725,6 +732,8 @@ async def auto_compact(
         return "摘要生成失败：多次重试后仍超出上下文限制"
 
     summary = extract_summary(llm_output)
+    if recovery is not None:
+        recovery.prune()
     attachment = build_recovery_attachment(recovery, tool_schemas)
     new_messages = build_compact_messages(summary, attachment=attachment)
 

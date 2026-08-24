@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -24,26 +25,50 @@ class PathSandbox:
     def project_root(self) -> Path:
         return self._allowed_roots[0]
 
+    @property
+    def allowed_roots(self) -> list[Path]:
+        """All allowed roots; index 0 is the project root."""
+        return list(self._allowed_roots)
+
 
     def check(self, path: str) -> tuple[bool, str]:
+        has_traversal = ".." in Path(path).parts
+
         p = Path(path).expanduser()
         if not p.is_absolute():
             p = self.project_root / p
         # 先通过 normpath 消除 ".." 组件，防止路径遍历
-        import os
         abs_path = Path(os.path.normpath(str(p.absolute())))
+
+        if has_traversal:
+            # Traversal segments may only resolve strictly inside the project
+            # root — not merely inside another allowed root such as the shared
+            # tempdir. Anything else goes through user confirmation instead.
+            try:
+                # Non-strict: resolves symlinks of existing ancestors (e.g.
+                # macOS /var -> /private/var) and leaves the missing tail.
+                abs_path.resolve(strict=False).relative_to(self.project_root)
+            except ValueError:
+                return False, f"路径遍历超出项目根: {path}"
 
         try:
             real_path = abs_path.resolve(strict=True)
         except OSError:
-            parent = abs_path.parent
-            try:
-                parent_real = parent.resolve(strict=True)
-            except OSError:
+            # Path (or part of its parent chain) doesn't exist yet — a write
+            # to a new directory, e.g. the plan file. Resolve the deepest
+            # existing ancestor and re-join the remaining components; nothing
+            # in the missing segment can hide a symlink.
+            real_path = None
+            for anc in abs_path.parents:
+                try:
+                    real_anc = anc.resolve(strict=True)
+                except OSError:
+                    continue
+                rel = abs_path.relative_to(anc)
+                real_path = real_anc.joinpath(*rel.parts)
+                break
+            if real_path is None:
                 return False, f"无法解析路径: {path}"
-            real_path = parent_real / abs_path.name
-            # 对新文件路径也做规范化检查
-            real_path = Path(os.path.normpath(str(real_path)))
 
         for root in self._allowed_roots:
             try:

@@ -10,7 +10,6 @@ from codeyx.commands.registry import (
     UIController,
 )
 
-
 __all__ = [
     "Command",
     "CommandContext",

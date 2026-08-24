@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
 # CodeYX tmux-based E2E smoke test helper.
 # Usage:
-#   ./scripts/mewtest.sh start              — start CodeYX in tmux
-#   ./scripts/mewtest.sh send "message"     — send a message
-#   ./scripts/mewtest.sh capture            — capture current screen
-#   ./scripts/mewtest.sh wait [timeout]     — wait until response completes (default 60s)
-#   ./scripts/mewtest.sh sendwait "msg" [t] — send + wait + capture
-#   ./scripts/mewtest.sh stop               — kill the session
-#   ./scripts/mewtest.sh smoke              — full smoke test: start → send → verify → stop
+#   ./scripts/test.sh start              — start CodeYX in tmux
+#   ./scripts/test.sh send "message"     — send a message
+#   ./scripts/test.sh capture            — capture current screen
+#   ./scripts/test.sh wait [timeout]     — wait until response completes (default 60s)
+#   ./scripts/test.sh sendwait "msg" [t] — send + wait + capture
+#   ./scripts/test.sh stop               — kill the session
+#   ./scripts/test.sh smoke              — full smoke test: start → send → verify → stop
 
 set -euo pipefail
 
-SESSION="mewtest"
+SESSION="codeyx-test"
 CODEX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BINARY="$CODEX_DIR/codeyx"
 WIDTH=120
 HEIGHT=40
 
 start() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
     tmux new-session -d -s "$SESSION" -x "$WIDTH" -y "$HEIGHT" \
-        "cd '$CODEX_DIR' && '$BINARY'"
+        "cd '$CODEX_DIR' && uv run codeyx"
 
     local timeout=10
     local elapsed=0
@@ -121,10 +120,10 @@ smoke() {
 
 case "${1:-help}" in
     start)     start ;;
-    send)      send "${2:?usage: mewtest.sh send \"message\"}" ;;
+    send)      send "${2:?usage: test.sh send \"message\"}" ;;
     capture)   capture ;;
     wait)      wait_response "${2:-60}" ;;
-    sendwait)  sendwait "${2:?usage: mewtest.sh sendwait \"message\" [timeout]}" "${3:-60}" ;;
+    sendwait)  sendwait "${2:?usage: test.sh sendwait \"message\" [timeout]}" "${3:-60}" ;;
     stop)      stop ;;
     smoke)     smoke ;;
     *)

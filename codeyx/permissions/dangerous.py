@@ -5,8 +5,10 @@ import re
 import shlex
 
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/\s*$", re.IGNORECASE), "递归强制删除根目录"),
-    (re.compile(r"rm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+/\s*$", re.IGNORECASE), "递归强制删除根目录"),
+    # Recursive-force deletion of / is detected by _detect_rm_variants()
+    # below at the token level: regex enumeration cannot cover arbitrary
+    # flag orders and mixed short/long spellings.
+    (re.compile(r"--no-preserve-root", re.IGNORECASE), "绕过根目录保护"),
     (re.compile(r"mkfs\.", re.IGNORECASE), "格式化磁盘"),
     (re.compile(r"dd\s+if=.*of=/dev/", re.IGNORECASE), "直接写磁盘设备"),
     (re.compile(r"chmod\s+-R\s+777\s+/", re.IGNORECASE), "递归修改根目录权限"),
@@ -28,17 +30,20 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+# Strictly read-only commands. Anything that can write, delete, or execute
+# (find -delete/-exec, xargs, sed -i, awk system(), tee, npx, …) must NOT be
+# listed here — those fall through to the mode matrix / user confirmation.
 _SAFE_COMMANDS = frozenset({
     "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc",
-    "find", "which", "whereis", "whoami", "hostname", "uname",
+    "which", "whereis", "whoami", "hostname", "uname",
     "date", "cal", "uptime", "df", "du", "free", "env", "printenv",
     "file", "stat", "readlink", "realpath", "basename", "dirname",
-    "sort", "uniq", "tr", "cut", "awk", "sed", "grep", "egrep", "fgrep",
-    "diff", "comm", "tee", "xargs", "true", "false", "test",
+    "sort", "uniq", "tr", "cut", "grep", "egrep", "fgrep",
+    "diff", "comm", "true", "false", "test",
     "git status", "git log", "git diff", "git show", "git branch",
     "git tag", "git remote", "git rev-parse", "git ls-files",
     "git blame", "git stash list", "go version", "go env",
-    "node -v", "npm -v", "npx", "python --version", "pip list",
+    "node -v", "npm -v", "python --version", "pip list",
     "cargo --version", "rustc --version", "java -version", "java --version",
 })
 
@@ -70,7 +75,73 @@ def _extract_wrapped_payload(command: str) -> str | None:
     return None
 
 
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+
+
+def _detect_rm_variants(command: str) -> str:
+    """Token-level detection of recursive deletion aimed at the filesystem
+    root. Flags may appear in any order, combined or separate, short or
+    long ("rm -rf /", "rm --force --recursive /", "rm -r -f /*", …).
+    Chained commands are checked segment-by-segment."""
+    for segment in _SEGMENT_SPLIT_RE.split(command):
+        reason = _detect_rm_segment(segment.strip())
+        if reason:
+            return reason
+    return ""
+
+
+def _detect_rm_segment(segment: str) -> str:
+    if not segment:
+        return ""
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        tokens = segment.split()
+    if not tokens or tokens[0].lower() != "rm":
+        return ""
+
+    recursive = False
+    force = False
+    saw_double_dash = False
+    root_target = False
+    for tok in tokens[1:]:
+        if tok == "--" and not saw_double_dash:
+            saw_double_dash = True
+            continue
+        if not saw_double_dash and tok.startswith("--") and len(tok) > 2:
+            name = tok[2:].lower()
+            if name in ("recursive", "r"):
+                recursive = True
+            elif name in ("force", "f"):
+                force = True
+            # --no-preserve-root is caught by its own pattern above.
+            continue
+        if not saw_double_dash and tok.startswith("-") and len(tok) > 1:
+            chars = set(tok[1:])
+            if "r" in chars or "R" in chars:
+                recursive = True
+            if "f" in chars or "F" in chars:
+                force = True
+            continue
+        # Operand. Root itself plus globs that expand to root's children.
+        if tok in ("/", "//", "/*", "/*/*") or tok.startswith("/*/"):
+            root_target = True
+
+    if recursive and root_target:
+        return "递归强制删除根目录"
+    if recursive and force:
+        # recursive+force outside root is not auto-denied; it falls through
+        # to the mode matrix / user confirmation like other writes.
+        return ""
+    return ""
+
+
 def is_safe_command(command: str) -> bool:
+    # Newlines are shell command separators. Normalizing them away would let
+    # "<safe-cmd>\n<arbitrary payload>" prefix-match an allowlisted entry, so
+    # any multi-line command must go through the full pipeline instead.
+    if "\n" in command or "\r" in command:
+        return False
     trimmed = _normalize_command(command)
     if not trimmed:
         return False
@@ -95,6 +166,9 @@ class DangerousCommandDetector:
 
     def detect(self, command: str) -> tuple[bool, str]:
         command = _normalize_command(command)
+        rm_reason = _detect_rm_variants(command)
+        if rm_reason:
+            return True, rm_reason
         for pattern, reason in self._patterns:
             if pattern.search(command):
                 return True, reason

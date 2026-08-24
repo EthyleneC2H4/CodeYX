@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import re
+import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
 from codeyx.hooks.conditions import ConditionGroup
+
+# $EVENT / $TOOL_NAME / … and $TOOL_ARGS.<key>. Word-boundary after the fixed
+# names prevents partial-name collisions (e.g. $TOOL_NAME_X); \w+ covers the
+# conventional JSON argument keys.
+_PLACEHOLDER_RE = re.compile(
+    r"\$(EVENT|TOOL_NAME|FILE_PATH|MESSAGE|ERROR)\b|\$TOOL_ARGS\.(\w+)"
+)
 
 
 @dataclass
@@ -57,26 +66,50 @@ class HookContext:
     error: str = ""
 
     def get_field(self, name: str) -> str:
-        if name == "tool":
-            return self.tool_name
-        if name == "event":
-            return self.event_name
+        """Resolve a condition field. Supports the same names as expand():
+        tool/event/file_path/message/error and args.<key>."""
+        direct = {
+            "tool": self.tool_name,
+            "event": self.event_name,
+            "file_path": self.file_path,
+            "message": self.message,
+            "error": self.error,
+        }
+        if name in direct:
+            return direct[name]
         if name.startswith("args."):
             key = name[5:]
             value = self.tool_args.get(key, "")
             return str(value) if value else ""
         return ""
 
-    def expand(self, template: str) -> str:
-        result = template
-        result = result.replace("$EVENT", self.event_name)
-        result = result.replace("$TOOL_NAME", self.tool_name)
-        result = result.replace("$FILE_PATH", self.file_path)
-        result = result.replace("$MESSAGE", self.message)
-        result = result.replace("$ERROR", self.error)
-        for key, value in self.tool_args.items():
-            result = result.replace(f"$TOOL_ARGS.{key}", str(value))
-        return result
+    def expand(self, template: str, *, shell_quote: bool = False) -> str:
+        """Expand $VARS / $TOOL_ARGS.<key> in a hook template.
+
+        Substitution is single-pass: a value containing text that looks like
+        another placeholder is never expanded a second time. With
+        ``shell_quote=True`` every substituted value is quoted with
+        ``shlex.quote`` so interpolated tool arguments cannot break out of the
+        command executed by the `command` executor."""
+        values: dict[str, str] = {k: str(v) for k, v in self.tool_args.items()}
+        # Reserved context keys always win: a tool argument named "MESSAGE"
+        # or "TOOL_NAME" must never be able to spoof hook context.
+        values.update({
+            "EVENT": self.event_name,
+            "TOOL_NAME": self.tool_name,
+            "FILE_PATH": self.file_path,
+            "MESSAGE": self.message,
+            "ERROR": self.error,
+        })
+
+        def _repl(m: re.Match[str]) -> str:
+            key = m.group(1) or m.group(2)
+            if key not in values:
+                return m.group(0)
+            val = values[key]
+            return shlex.quote(val) if shell_quote else val
+
+        return _PLACEHOLDER_RE.sub(_repl, template)
 
 
 class ToolRejectedError(Exception):

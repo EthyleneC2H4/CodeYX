@@ -51,33 +51,37 @@ class HookEngine:
                 await self._run_single(hook, ctx)
 
 
-    async def _run_single(self, hook: Hook, ctx: HookContext) -> None:
+    async def _execute_hook(self, hook: Hook, ctx: HookContext) -> ActionResult:
+        """Run one hook action under its configured timeout. Never raises —
+        failures (including timeouts) come back as unsuccessful results so a
+        hung hook cannot stall the agent loop."""
         try:
-            result = await execute_action(hook.action, ctx)
-            if hook.action.type == "prompt" and result.success:
-                self._prompt_messages.append(result.output)
-            self._notifications.append(
-                HookNotification(
-                    hook_id=hook.id,
-                    event=hook.event,
-                    output=result.output,
-                    success=result.success,
-                )
+            return await asyncio.wait_for(
+                execute_action(hook.action, ctx), timeout=hook.action.timeout
             )
-            if not result.success:
-                log.warning(
-                    "Hook '%s' action failed: %s", hook.id, result.output
-                )
+        except TimeoutError:
+            return ActionResult(
+                output=f"Hook '{hook.id}' timed out after {hook.action.timeout}s",
+                success=False,
+            )
         except Exception as e:
             log.warning("Hook '%s' execution error: %s", hook.id, e)
-            self._notifications.append(
-                HookNotification(
-                    hook_id=hook.id,
-                    event=hook.event,
-                    output=str(e),
-                    success=False,
-                )
+            return ActionResult(output=str(e), success=False)
+
+    async def _run_single(self, hook: Hook, ctx: HookContext) -> None:
+        result = await self._execute_hook(hook, ctx)
+        if hook.action.type == "prompt" and result.success:
+            self._prompt_messages.append(result.output)
+        self._notifications.append(
+            HookNotification(
+                hook_id=hook.id,
+                event=hook.event,
+                output=result.output,
+                success=result.success,
             )
+        )
+        if not result.success:
+            log.warning("Hook '%s' action failed: %s", hook.id, result.output)
 
 
     async def run_pre_tool_hooks(
@@ -86,24 +90,21 @@ class HookEngine:
         matched = self.find_matching_hooks("pre_tool_use", ctx)
         for hook in matched:
             hook.mark_executed()
-            try:
-                result = await execute_action(hook.action, ctx)
-                self._notifications.append(
-                    HookNotification(
-                        hook_id=hook.id,
-                        event="pre_tool_use",
-                        output=result.output,
-                        success=result.success,
-                    )
+            result = await self._execute_hook(hook, ctx)
+            self._notifications.append(
+                HookNotification(
+                    hook_id=hook.id,
+                    event="pre_tool_use",
+                    output=result.output,
+                    success=result.success,
                 )
-                if hook.reject:
-                    return ToolRejectedError(
-                        tool=ctx.tool_name,
-                        reason=result.output,
-                        hook_id=hook.id,
-                    )
-            except Exception as e:
-                log.warning("Hook '%s' execution error: %s", hook.id, e)
+            )
+            if hook.reject:
+                return ToolRejectedError(
+                    tool=ctx.tool_name,
+                    reason=result.output,
+                    hook_id=hook.id,
+                )
         return None
 
     def get_prompt_messages(self) -> list[str]:

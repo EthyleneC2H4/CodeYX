@@ -5,28 +5,26 @@ from __future__ import annotations
 
 import asyncio
 import textwrap
-import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from codeyx.agents.parser import AgentDef, AgentParseError, parse_agent_file, parse_frontmatter
-from codeyx.agents.loader import AgentLoader
-from codeyx.agents.tool_filter import (
-    ALL_AGENT_DISALLOWED_TOOLS,
-    ASYNC_AGENT_ALLOWED_TOOLS,
-    resolve_agent_tools,
-)
 from codeyx.agents.fork import (
     FORK_BOILERPLATE_TAG,
     ForkError,
     build_forked_messages,
 )
-from codeyx.agents.trace import TraceManager, TraceNode
-from codeyx.agents.task_manager import BackgroundTask, TaskManager
+from codeyx.agents.loader import AgentLoader
 from codeyx.agents.notification import format_task_notification, inject_task_notifications
-from codeyx.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from codeyx.agents.parser import AgentDef, AgentParseError, parse_agent_file, parse_frontmatter
+from codeyx.agents.task_manager import BackgroundTask, TaskManager
+from codeyx.agents.tool_filter import (
+    ASYNC_AGENT_ALLOWED_TOOLS,
+    resolve_agent_tools,
+)
+from codeyx.agents.trace import TraceManager
+from codeyx.conversation import ConversationManager, ToolUseBlock
 from codeyx.tools import ToolRegistry
 from codeyx.tools.base import Tool, ToolResult
 

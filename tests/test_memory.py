@@ -1,9 +1,7 @@
 
 from __future__ import annotations
 
-import json
-import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,7 +20,6 @@ from codeyx.memory.instructions import (
 )
 from codeyx.memory.session import (
     RecordType,
-    ResumeResult,
     Session,
     SessionManager,
     SessionMeta,
@@ -219,7 +216,7 @@ class TestSessionManager:
     def test_cleanup_removes_old_sessions(self, tmp_path: Path) -> None:
         mgr = SessionManager(str(tmp_path))
         s = mgr.create()
-        s.meta.last_active = datetime.now(timezone.utc) - timedelta(days=31)
+        s.meta.last_active = datetime.now(UTC) - timedelta(days=31)
         s.meta.save(mgr._sessions_dir / f"{s.session_id}.meta")
         s.close()
 
@@ -240,7 +237,7 @@ class TestSessionManager:
 
 class TestValidateMessageChain:
     def test_complete_chain(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="hi", timestamp=now),
             SessionRecord(
@@ -262,7 +259,7 @@ class TestValidateMessageChain:
         assert validate_message_chain(records) == 4
 
     def test_truncate_at_missing_tool_result(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="hi", timestamp=now),
             SessionRecord(type=RecordType.ASSISTANT, content="ok", timestamp=now),
@@ -281,7 +278,7 @@ class TestValidateMessageChain:
 
 class TestRecordsToMessages:
     def test_basic_roundtrip(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="hello", timestamp=now),
             SessionRecord(type=RecordType.ASSISTANT, content="world", timestamp=now),
@@ -292,7 +289,7 @@ class TestRecordsToMessages:
         assert messages[1].role == "assistant"
 
     def test_tool_result_grouping(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="go", timestamp=now),
             SessionRecord(
@@ -321,7 +318,7 @@ class TestRecordsToMessages:
         assert messages[3].role == "assistant"
 
     def test_system_prompt_skipped(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.SYSTEM_PROMPT, content="system", timestamp=now),
             SessionRecord(type=RecordType.USER, content="hi", timestamp=now),
@@ -378,11 +375,11 @@ class TestSessionResume:
 
 class TestTimeGapMessage:
     def test_no_gap_returns_none(self) -> None:
-        recent = datetime.now(timezone.utc) - timedelta(hours=1)
+        recent = datetime.now(UTC) - timedelta(hours=1)
         assert build_time_gap_message(recent) is None
 
     def test_gap_returns_message(self) -> None:
-        old = datetime.now(timezone.utc) - timedelta(hours=48)
+        old = datetime.now(UTC) - timedelta(hours=48)
         msg = build_time_gap_message(old)
         assert msg is not None
         assert "代码可能有变更" in msg.content

@@ -3,23 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from codeyx.worktree.changes import has_unpushed_commits, has_worktree_changes
 from codeyx.worktree.manager import WorktreeManager
 
 log = logging.getLogger(__name__)
 
+# Names eligible for stale cleanup. Only patterns this codebase actually
+# generates belong here: generate_worktree_name() emits
+# `agent-` + secrets.token_hex(4) (8 hex chars). A mismatched length would
+# make every ephemeral worktree permanent garbage. Named/slug worktrees the
+# user created deliberately never match and are never touched.
 EPHEMERAL_PATTERNS = [
-    re.compile(r"^agent-a[0-9a-f]{7}$"),
-    re.compile(r"^wf_[0-9a-f]{8}-[0-9a-f]{3}-\d+$"),
-    re.compile(r"^wf-\d+$"),
-    re.compile(r"^bridge-[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*$"),
-    re.compile(r"^job-[a-zA-Z0-9._-]{1,55}-[0-9a-f]{8}$"),
+    re.compile(r"^agent-[0-9a-f]{8}$"),
+    re.compile(r"^agent-[0-9a-f]{7}$"),  # legacy names from the old generator
 ]
 
 
@@ -64,16 +64,7 @@ async def cleanup_stale_worktrees(manager: WorktreeManager, cutoff_hours: int) -
             continue
 
         try:
-            flat_name = name
-            if flat_name in manager.active:
-                await manager._remove_worktree(flat_name, manager.active[flat_name])
-            else:
-                result = manager._run_git(
-                    ["worktree", "remove", "--force", str(entry)]
-                )
-                if result.returncode == 0:
-                    await asyncio.sleep(0.1)
-                    manager._run_git(["branch", "-D", f"worktree-{flat_name}"])
+            await manager.remove_worktree(name)
             removed += 1
             log.info("Cleaned up stale worktree: %s", name)
         except Exception as e:

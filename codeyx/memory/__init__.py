@@ -13,7 +13,6 @@ from codeyx.memory.session import (
     validate_message_chain,
 )
 
-
 __all__ = [
     "MemoryManager",
     "ResumeResult",

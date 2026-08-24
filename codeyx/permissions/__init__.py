@@ -6,7 +6,6 @@ from codeyx.permissions.modes import DecisionEffect, PermissionMode, mode_decide
 from codeyx.permissions.rules import Rule, RuleEngine, extract_content, parse_rule
 from codeyx.permissions.sandbox import PathSandbox
 
-
 __all__ = [
     "Decision",
     "DecisionEffect",

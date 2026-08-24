@@ -1,12 +1,8 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 import time
 from pathlib import Path
-
-import pytest
 
 from codeyx.context.manager import (
     AGGREGATE_CHAR_LIMIT,
@@ -15,8 +11,8 @@ from codeyx.context.manager import (
     CompactCircuitBreaker,
     RecoveryState,
     apply_tool_result_budget,
-    build_recovery_attachment,
     build_compact_messages,
+    build_recovery_attachment,
     cleanup_tool_results,
     compute_compact_threshold,
     create_replacement_state,
@@ -30,7 +26,6 @@ from codeyx.conversation import (
     ConversationManager,
     Message,
     ToolResultBlock,
-    ToolUseBlock,
 )
 
 # ---------------------------------------------------------------------------
@@ -65,7 +60,7 @@ class TestMakePersistedPreview:
         content = "a" * 5_000
         preview = make_persisted_preview(content, tmp_path / "test.txt")
         lines = preview.split("\n")
-        preview_line = [l for l in lines if l.startswith("aaa")]
+        preview_line = [ln for ln in lines if ln.startswith("aaa")]
         assert len(preview_line) == 1
         assert len(preview_line[0]) == 2_000
 
@@ -268,7 +263,8 @@ class TestRecoveryState:
         assert [r.path for r in state.snapshot_files(10)] == ["new.py"]
         assert [r.name for r in state.snapshot_skills()] == ["new-skill"]
 
-    def test_build_recovery_attachment_prunes_before_render(self) -> None:
+    def test_build_recovery_attachment_renders_without_pruning(self) -> None:
+        """Render is side-effect free; eviction belongs to the explicit prune()."""
         state = RecoveryState()
         state.record_file_read("old.py", "old")
         state.record_file_read("new.py", "new")
@@ -276,7 +272,12 @@ class TestRecoveryState:
             state._files["old.py"].timestamp = time.time() - 30_000
 
         attachment = build_recovery_attachment(state, [])
+        assert "new.py" in attachment
+        assert "old.py" in attachment  # render does not evict
+        assert set(state._files) == {"old.py", "new.py"}
 
+        state.prune(max_age_seconds=60)
+        attachment = build_recovery_attachment(state, [])
         assert "new.py" in attachment
         assert "old.py" not in attachment
 

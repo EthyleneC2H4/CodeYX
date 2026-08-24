@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -8,7 +8,6 @@ from codeyx.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
     from codeyx.agent import Agent
-    from codeyx.skills.directory import register_skill_tools
     from codeyx.skills.loader import SkillLoader
 
 
@@ -55,6 +54,19 @@ class LoadSkill(Tool):
             available = ", ".join(n for n, _ in self._loader.get_catalog())
             return ToolResult(
                 output=f"Error: unknown skill '{params.name}'. Available skills: {available}",
+                is_error=True,
+            )
+
+        if getattr(skill, "mode", "inline") == "fork":
+            # Fork-mode skills run in an isolated sub-conversation via their
+            # auto-registered /<name> command; pinning the SOP inline would
+            # defeat that isolation.
+            return ToolResult(
+                output=(
+                    f"Skill '{skill.name}' is a fork-mode skill and cannot be "
+                    f"pinned inline. It runs in an isolated fork when the user "
+                    f"invokes /{skill.name}."
+                ),
                 is_error=True,
             )
 

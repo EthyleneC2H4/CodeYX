@@ -38,13 +38,32 @@ def _json_type_to_python(json_type: str) -> type:
     return mapping.get(json_type, str)
 
 
+def _model_field(obj: Any, *names: str) -> Any:
+    """Read a field whose name changed across mcp SDK versions.
+
+    mcp 1.x exposes camelCase attributes (inputSchema, mimeType, isError);
+    mcp 2.x renamed them to snake_case. Try each name in order.
+    """
+    for name in names:
+        value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _tool_input_schema(tool_def: Any) -> dict[str, Any]:
+    schema = _model_field(tool_def, "input_schema", "inputSchema")
+    return schema if isinstance(schema, dict) else {}
+
+
 def _extract_text(content: list[Any]) -> str:
     parts: list[str] = []
     for block in content:
         if isinstance(block, mcp_types.TextContent):
             parts.append(block.text)
         elif isinstance(block, mcp_types.ImageContent):
-            parts.append(f"[image: {block.mimeType}]")
+            mime = _model_field(block, "mime_type", "mimeType") or "unknown"
+            parts.append(f"[image: {mime}]")
         elif isinstance(block, mcp_types.EmbeddedResource):
             resource = block.resource
             if hasattr(resource, "text"):
@@ -76,7 +95,7 @@ class MCPToolWrapper(Tool):
             tags=("mcp", server_name, tool_def.name),
         )
         self.params_model = _build_params_model(
-            tool_def.name, tool_def.inputSchema
+            tool_def.name, _tool_input_schema(tool_def)
         )
 
     @property
@@ -88,7 +107,7 @@ class MCPToolWrapper(Tool):
         return {
             "name": self.name,
             "description": self.description,
-            "input_schema": self._tool_def.inputSchema,
+            "input_schema": _tool_input_schema(self._tool_def),
         }
 
 
@@ -126,7 +145,7 @@ class MCPToolWrapper(Tool):
         text = _extract_text(result.content)
         return ToolResult(
             output=text,
-            is_error=bool(result.isError),
+            is_error=bool(_model_field(result, "is_error", "isError")),
             metadata={
                 "source": "mcp",
                 "server": self._server_name,

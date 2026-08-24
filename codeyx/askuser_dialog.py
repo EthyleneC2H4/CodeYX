@@ -71,7 +71,9 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         lines.append(f" [bold color(99)]{header}[/]\n")
 
         options = q.get("options", [])
-        is_multi = q.get("multiSelect", False)
+        # `type == "checkbox"` is the tool-schema contract; multiSelect is a
+        # legacy alias kept for backwards compatibility.
+        is_multi = bool(q.get("multiSelect", False)) or q.get("type") == "checkbox"
         cursor = self._cursors[self._q_idx]
 
         for i, opt in enumerate(options):
@@ -148,7 +150,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         q = self._questions[self._q_idx]
         options = q.get("options", [])
         cursor = self._cursors[self._q_idx]
-        is_multi = q.get("multiSelect", False)
+        is_multi = bool(q.get("multiSelect", False)) or q.get("type") == "checkbox"
 
         if cursor == len(options):  # "Other"
             self._answered[self._q_idx] = self._others[self._q_idx] or "Other"
@@ -211,7 +213,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         if self._on_submit:
             return
         q = self._questions[self._q_idx]
-        if not q.get("multiSelect", False):
+        if not (q.get("multiSelect", False) or q.get("type") == "checkbox"):
             return
         cursor = self._cursors[self._q_idx]
         options = q.get("options", [])
@@ -219,13 +221,17 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             self._selected[self._q_idx][cursor] = not self._selected[self._q_idx].get(cursor, False)
             self._refresh()
 
+    def _answer_key(self, q: dict, idx: int) -> str:
+        """Key the tool resolves answers by: the question's `name` field.
+        Fall back to display text for hand-built question dicts."""
+        return str(q.get("name") or q.get("question") or q.get("message") or f"q{idx}")
+
     def action_select(self) -> None:
         if self._on_submit:
             if self._submit_idx == 0:
                 answers = {}
                 for i, q in enumerate(self._questions):
-                    key = q.get("question", q.get("message", f"q{i}"))
-                    answers[key] = self._answered.get(i, "")
+                    answers[self._answer_key(q, i)] = self._answered.get(i, "")
                 self.post_message(self.Responded(answers))
             else:
                 self.post_message(self.Responded(None))
@@ -233,9 +239,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             self._save_current_answer()
             if len(self._questions) == 1:
                 answers = {}
-                q = self._questions[0]
-                key = q.get("question", q.get("message", "q0"))
-                answers[key] = self._answered.get(0, "")
+                answers[self._answer_key(self._questions[0], 0)] = self._answered.get(0, "")
                 self.post_message(self.Responded(answers))
             elif self._q_idx < len(self._questions) - 1:
                 self._q_idx += 1

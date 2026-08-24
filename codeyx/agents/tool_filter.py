@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from codeyx.tools import ToolRegistry
 
@@ -19,15 +19,9 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "Workflow",
 })
 
-CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
-    "TaskOutput",
-    "ExitPlanMode",
-    "EnterPlanMode",
-    "Agent",
-    "AskUserQuestion",
-    "TaskStop",
-    "Workflow",
-})
+# Kept as a distinct name for readability at call sites, but currently
+# identical to the global set; custom agents may diverge later.
+CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = ALL_AGENT_DISALLOWED_TOOLS
 
 ASYNC_AGENT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "ReadFile",
@@ -85,9 +79,13 @@ def resolve_agent_tools(
 ) -> ToolRegistry:
     all_tools = {t.name: t for t in parent_registry.list_tools()}
 
-    # Layer 0: MCP tools always pass through — separate before filtering
+    # Layer 0: MCP tools bypass the builtin-tool layers, but an agent
+    # definition that explicitly disallows an MCP tool still wins.
     mcp_tools = {name: tool for name, tool in all_tools.items() if _is_mcp_tool(name)}
     all_tools = {name: tool for name, tool in all_tools.items() if not _is_mcp_tool(name)}
+    if definition.disallowed_tools:
+        for name in definition.disallowed_tools:
+            mcp_tools.pop(name, None)
 
     # Layer 1: global disallowed
     for name in ALL_AGENT_DISALLOWED_TOOLS:

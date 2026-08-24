@@ -8,11 +8,11 @@ from codeyx.commands.handlers.help import HELP_COMMAND
 from codeyx.commands.handlers.memory import MEMORY_COMMAND
 from codeyx.commands.handlers.permission import PERMISSION_COMMAND
 from codeyx.commands.handlers.plan import PLAN_COMMAND
+from codeyx.commands.handlers.review import REVIEW_COMMAND
 from codeyx.commands.handlers.session import SESSION_COMMAND
 from codeyx.commands.handlers.skill import SKILL_COMMAND
 from codeyx.commands.handlers.status import STATUS_COMMAND
 from codeyx.commands.registry import CommandRegistry
-
 
 ALL_COMMANDS = [
     HELP_COMMAND,
@@ -20,6 +20,7 @@ ALL_COMMANDS = [
     CLEAR_COMMAND,
     PLAN_COMMAND,
     DO_COMMAND,
+    REVIEW_COMMAND,
     SESSION_COMMAND,
     MEMORY_COMMAND,
     PERMISSION_COMMAND,

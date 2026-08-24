@@ -39,11 +39,11 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = [
     "-v",
     "--tb=short",
     "--strict-markers",
-    "--cov-report=term-missing",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -79,3 +79,6 @@ select = [
     "W",   # pycodestyle warnings
     "UP",  # pyupgrade
 ]
+# E501 (line-too-long) stays advisory: the codebase carries long CJK prompt
+# strings and URLs where mechanical wrapping hurts readability.
+ignore = ["E501"]

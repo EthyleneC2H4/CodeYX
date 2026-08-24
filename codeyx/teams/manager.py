@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from codeyx.teams.backend_detect import BackendDetectionError, detect_backend
+from codeyx.teams.backend_detect import detect_backend
 from codeyx.teams.mailbox import Mailbox, create_message
 from codeyx.teams.models import (
     AgentTeam,
@@ -19,7 +18,7 @@ from codeyx.teams.shared_task import SharedTaskStore
 from codeyx.teams.spawn_inprocess import InProcessTeammateHandle
 
 if TYPE_CHECKING:
-    from codeyx.agent import Agent
+    pass
 
 log = logging.getLogger(__name__)
 

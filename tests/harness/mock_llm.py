@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from codeyx.client import LLMClient
 from codeyx.conversation import ConversationManager
@@ -11,6 +12,7 @@ class ScriptedLLMClient(LLMClient):
     def __init__(self, script: list[list[dict[str, Any]]]) -> None:
         self._script = list(script)
         self.calls: list[dict[str, Any]] = []
+        self._tool_id_counter = 0
 
     async def stream(
         self,
@@ -34,8 +36,11 @@ class ScriptedLLMClient(LLMClient):
             if kind == "text":
                 yield TextDelta(text=str(item.get("text", "")))
             elif kind == "tool":
+                # Monotonic per-call counter: several tool calls can share one
+                # scripted turn and must not collide on the same id.
+                self._tool_id_counter += 1
                 yield ToolCallComplete(
-                    tool_id=str(item.get("id", f"tool-{len(self.calls)}")),
+                    tool_id=str(item.get("id", f"tool-{self._tool_id_counter}")),
                     tool_name=str(item["name"]),
                     arguments=dict(item.get("args", {})),
                 )

@@ -2,7 +2,6 @@
 """Tests for Slash Command framework — registry, parser, completion, handlers."""
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,7 +13,6 @@ from codeyx.commands.registry import (
     CommandContext,
     CommandRegistry,
     CommandType,
-    UIController,
 )
 
 # ---------------------------------------------------------------------------
@@ -528,7 +526,7 @@ class TestMemoryHandler:
 # ---------------------------------------------------------------------------
 
 class TestRegisterAllCommands:
-    def test_all_10_commands_registered(self) -> None:
+    def test_all_11_commands_registered(self) -> None:
         from codeyx.commands.handlers import register_all_commands
 
         registry = CommandRegistry()
@@ -536,7 +534,7 @@ class TestRegisterAllCommands:
         cmds = registry.list_commands()
         names = {c.name for c in cmds}
         expected = {
-            "help", "compact", "clear", "plan", "do",
+            "help", "compact", "clear", "plan", "do", "review",
             "session", "memory", "permission", "status", "skill",
         }
         assert names == expected

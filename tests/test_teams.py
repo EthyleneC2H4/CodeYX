@@ -3,28 +3,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from codeyx.teams.models import (
-    AgentTeam,
-    BackendType,
-    TeammateInfo,
-    resolve_team_dir,
-    unique_team_name,
+from codeyx.agents.tool_filter import (
+    COORDINATOR_MODE_ALLOWED_TOOLS,
+    IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
+    TEAMMATE_COORDINATION_TOOLS,
+    apply_coordinator_filter,
 )
-from codeyx.teams.task_protocol import TaskSpec, WorkerState, WorkerStatus
-from codeyx.teams.shared_task import SharedTask, SharedTaskStore
-from codeyx.teams.mailbox import Mailbox, MailboxMessage, create_message
-from codeyx.teams.registry import AgentNameRegistry
 from codeyx.teams.backend_detect import BackendDetectionError, detect_backend
 from codeyx.teams.coordinator import (
     get_coordinator_system_prompt,
@@ -32,13 +25,16 @@ from codeyx.teams.coordinator import (
     is_coordinator_mode,
     match_session_mode,
 )
-from codeyx.agents.tool_filter import (
-    COORDINATOR_MODE_ALLOWED_TOOLS,
-    IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
-    TEAMMATE_COORDINATION_TOOLS,
-    build_teammate_tools,
-    apply_coordinator_filter,
+from codeyx.teams.mailbox import Mailbox, create_message
+from codeyx.teams.models import (
+    AgentTeam,
+    BackendType,
+    TeammateInfo,
+    unique_team_name,
 )
+from codeyx.teams.registry import AgentNameRegistry
+from codeyx.teams.shared_task import SharedTaskStore
+from codeyx.teams.task_protocol import TaskSpec, WorkerState, WorkerStatus
 from codeyx.tools import ToolRegistry
 from codeyx.tools.base import Tool, ToolResult
 
@@ -338,6 +334,46 @@ class TestMailbox:
         assert mailbox.consume("nonexistent") == []
         assert mailbox.read("nonexistent") == []
 
+    def test_consume_recovers_claimed_message_after_crash(self, tmp_dir):
+        """A crash between claim (rename) and parse must not lose the
+        message: the next drain restores *.json.consuming files."""
+        mailbox = Mailbox(tmp_dir)
+        msg = create_message("alice", "bob", "survives crash")
+        mailbox.write("bob-id", msg)
+
+        # Simulate the crashed consumer: claim then die.
+        inbox = mailbox._agent_dir("bob-id")
+        (json_files) = [f for f in inbox.iterdir() if f.suffix == ".json"]
+        json_files[0].rename(json_files[0].with_suffix(".json.consuming"))
+
+        messages = mailbox.consume("bob-id")
+        assert len(messages) == 1
+        assert messages[0].content == "survives crash"
+
+    def test_consume_quarantines_malformed_without_destroying(self, tmp_dir):
+        mailbox = Mailbox(tmp_dir)
+        inbox = mailbox._agent_dir("bad-id")
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "0.000000_deadbeef.json").write_text("{not json", encoding="utf-8")
+
+        messages = mailbox.consume("bad-id")
+        assert messages == []
+        # Quarantined, not deleted.
+        leftovers = list(inbox.iterdir())
+        assert len(leftovers) == 1
+        assert leftovers[0].name.endswith(".corrupt")
+
+    def test_write_is_atomic_no_torn_reads(self, tmp_dir):
+        """After write() returns, the file is complete — a concurrent
+        consumer can never observe partial JSON."""
+        mailbox = Mailbox(tmp_dir)
+        msg = create_message("alice", "bob", "full payload")
+        mailbox.write("bob-id", msg)
+        raw = next(iter(mailbox._agent_dir("bob-id").iterdir())).read_text(
+            encoding="utf-8"
+        )
+        assert json.loads(raw)["content"] == "full payload"
+
 # =====================================================================
 # 4. AgentNameRegistry
 # =====================================================================
@@ -593,7 +629,7 @@ class TestTranscript:
 
 class TestAgentCoordinatorIntegration:
     def test_normal_prompt(self):
-        from codeyx.prompts import build_system_prompt, BASE_PERSONA
+        from codeyx.prompts import BASE_PERSONA, build_system_prompt
         prompt = build_system_prompt()
         assert BASE_PERSONA in prompt
 
@@ -605,7 +641,7 @@ class TestAgentCoordinatorIntegration:
         assert "Synthesis" in prompt
 
     def test_coordinator_overrides_plan(self):
-        from codeyx.prompts import build_system_prompt, PLAN_MODE_INSTRUCTIONS
+        from codeyx.prompts import PLAN_MODE_INSTRUCTIONS, build_system_prompt
         prompt = build_system_prompt(plan_mode=True, coordinator_mode=True)
         assert PLAN_MODE_INSTRUCTIONS not in prompt
         assert "coordinator" in prompt.lower()

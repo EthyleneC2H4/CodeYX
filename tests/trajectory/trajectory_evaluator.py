@@ -15,7 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ============================================================================
 # Data structures
 # ============================================================================
@@ -392,7 +391,6 @@ Respond with ONLY a JSON object:
 
         Returns scores normalized to 0-1 range.
         """
-        prompt = self.build_prompt(record)
         if self._client is None:
             # Fallback: return heuristic defaults
             return {"tool_selection": 0.5, "efficiency": 0.5,

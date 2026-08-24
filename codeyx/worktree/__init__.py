@@ -14,7 +14,6 @@ from codeyx.worktree.models import Worktree, WorktreeSession
 from codeyx.worktree.session import load_worktree_session, save_worktree_session
 from codeyx.worktree.slug import flatten_slug, validate_slug
 
-
 __all__ = [
     "Changes",
     "CleanupResult",

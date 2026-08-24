@@ -1,0 +1,33 @@
+# CodeYX configuration example.
+# Copy to config.yaml (git-ignored) and fill in your own values.
+
+providers:
+  - name: anthropic
+    protocol: anthropic          # anthropic | openai | openai-compat
+    base_url: https://api.anthropic.com
+    model: claude-sonnet-4-5
+    # api_key: leave empty to read from the env (ANTHROPIC_API_KEY for the
+    # "anthropic" protocol; OPENAI_API_KEY / DEEPSEEK_API_KEY otherwise),
+    # or use ${VAR} interpolation:
+    api_key: ${ANTHROPIC_API_KEY}
+    thinking: false              # enables extended thinking + larger output budget
+    context_window: 200000
+
+# permission_mode: default      # default | acceptEdits | plan | bypassPermissions | dontAsk
+
+mcp_servers: []
+  # - name: filesystem
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+  # - name: remote
+  #   url: https://example.com/mcp
+  #   headers:
+  #     Authorization: Bearer ${MY_TOKEN}
+
+worktree:
+  symlink_directories: ["node_modules", ".venv", "vendor"]
+  stale_cleanup_interval: 3600   # seconds between stale-worktree sweeps
+  stale_cutoff_hours: 24         # worktrees idle longer than this are eligible
+
+enable_fork: false               # Skill fork-mode isolation
+teammate_mode: ""                # tmux | iterm2 | in-process (empty = auto)

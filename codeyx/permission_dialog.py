@@ -8,7 +8,6 @@ from textual.widgets import Static
 
 from codeyx.agent import PermissionResponse
 
-
 _PERM_OPTIONS = [
     ("Yes", PermissionResponse.ALLOW),
     ("Yes, and don't ask again for this pattern", PermissionResponse.ALLOW_ALWAYS),

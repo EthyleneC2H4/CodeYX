@@ -3,17 +3,15 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from codeyx.context.manager import (
+    _RECOVERY_CHARS_PER_TOKEN,
     RECOVERY_FILE_LIMIT,
-    RECOVERY_SKILLS_BUDGET,
     RECOVERY_TOKENS_PER_FILE,
     RECOVERY_TOKENS_PER_SKILL,
     RecoveryState,
-    _RECOVERY_CHARS_PER_TOKEN,
     build_recovery_attachment,
 )
+
 
 def test_recovery_attachment_empty_when_nothing_recorded():
     assert build_recovery_attachment(None, None) == ""
@@ -58,13 +56,29 @@ def test_recovery_truncates_per_file():
 def test_recovery_skills_budget():
     state = RecoveryState()
     body = "y" * int(RECOVERY_TOKENS_PER_SKILL * _RECOVERY_CHARS_PER_TOKEN)
+    now = time.time()
     for i in range(6):
         name = f"skill-{i}"
         state.record_skill_invocation(name, body)
         rec = state._skills[name]
-        rec.timestamp = 1000.0 + i
+        rec.timestamp = now - (6 - i)
 
     out = build_recovery_attachment(state, None)
     emitted = out.count("### skill-")
     # 25K / 5K per skill ⇒ at most 5
     assert 1 <= emitted <= 5
+
+def test_recovery_render_does_not_prune_stale_records():
+    """build_recovery_attachment renders whatever is recorded; stale-snapshot
+    eviction is auto_compact's explicit prune() call, not a render side effect."""
+    state = RecoveryState()
+    state.record_file_read("/tmp/stale.py", "print('old')\n")
+    rec = state._files["/tmp/stale.py"]
+    rec.timestamp = 1000.0  # epoch-ancient
+
+    out = build_recovery_attachment(state, None)
+    assert "/tmp/stale.py" in out
+    assert len(state._files) == 1
+
+    state.prune()
+    assert len(state._files) == 0

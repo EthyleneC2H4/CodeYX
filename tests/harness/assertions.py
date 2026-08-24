@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from tests.harness.scenario_runner import HarnessResult, HarnessScenario
 
-
 DANGEROUS_COMMAND_MARKERS = ("sudo ", "rm -rf", "chmod 777", "> /etc/", "> /dev/")
 
 

@@ -4,8 +4,8 @@ import json
 import random
 import string
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from enum import Enum
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -30,7 +30,7 @@ SESSION_SUMMARY_PROMPT = (
 # ---------------------------------------------------------------------------
 
 
-class RecordType(str, Enum):
+class RecordType(StrEnum):
     SYSTEM_PROMPT = "system_prompt"
     USER = "user"
     ASSISTANT = "assistant"
@@ -75,7 +75,7 @@ class SessionRecord:
 
     @classmethod
     def from_message(cls, message: Message) -> list[SessionRecord]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records: list[SessionRecord] = []
 
         if message.tool_results:
@@ -233,8 +233,8 @@ class SessionMeta:
     summary: str = ""
     message_count: int = 0
     total_tokens: int = 0
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    last_active: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def save(self, path: Path) -> None:
         data = {
@@ -292,7 +292,7 @@ class Session:
         self._file.flush()
 
         self.meta.message_count += 1
-        self.meta.last_active = datetime.now(timezone.utc)
+        self.meta.last_active = datetime.now(UTC)
 
         if not self.meta.title and message.role == "user" and message.content:
             self.meta.title = message.content[:TITLE_MAX_LENGTH]
@@ -361,7 +361,7 @@ async def generate_session_summary(
 
 
 def build_time_gap_message(last_active: datetime) -> Message | None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     gap = now - last_active
     if gap < TIME_GAP_THRESHOLD:
         return None
@@ -475,7 +475,7 @@ class SessionManager:
         return deleted
 
     def cleanup(self, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> int:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         removed = 0
 
         for meta_path in list(self._sessions_dir.glob("*.meta")):

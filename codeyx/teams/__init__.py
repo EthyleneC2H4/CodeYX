@@ -12,7 +12,6 @@ from codeyx.teams.registry import AgentNameRegistry
 from codeyx.teams.shared_task import SharedTask, SharedTaskStore
 from codeyx.teams.task_protocol import TaskSpec, WorkerState, WorkerStatus
 
-
 __all__ = [
     "AgentTeam",
     "AgentNameRegistry",

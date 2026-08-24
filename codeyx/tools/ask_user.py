@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -52,6 +54,13 @@ class AskUserTool(Tool):
 
     def __init__(self) -> None:
         self._pending_event: AskUserEvent | None = None
+        # Set by the UI layer: invoked the moment a question becomes pending,
+        # because the agent loop is blocked awaiting the future and cannot
+        # surface the dialog through the normal event stream.
+        self.on_pending: Callable[[AskUserEvent], Awaitable[None]] | None = None
+        # Invoked when the question resolves WITHOUT a user answer (i.e. on
+        # timeout): without it the dialog stays mounted with input disabled.
+        self.on_expired: Callable[[AskUserEvent], Awaitable[None]] | None = None
 
     async def execute(self, params: AskUserParams) -> ToolResult:
         questions_data = [q.model_dump() for q in params.questions]
@@ -59,11 +68,26 @@ class AskUserTool(Tool):
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, str]] = loop.create_future()
 
-        self._pending_event = AskUserEvent(questions=questions_data, future=future)
+        event = AskUserEvent(questions=questions_data, future=future)
+        self._pending_event = event
+        if self.on_pending is not None:
+            try:
+                await self.on_pending(event)
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "AskUserQuestion dialog failed to open: %s", e
+                )
 
         try:
             answers = await asyncio.wait_for(future, timeout=300)
-        except asyncio.TimeoutError:
+        except TimeoutError:
+            if self.on_expired is not None:
+                try:
+                    await self.on_expired(event)
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "AskUserQuestion dialog cleanup failed: %s", e
+                    )
             return ToolResult(
                 output="User did not respond within 5 minutes", is_error=True
             )

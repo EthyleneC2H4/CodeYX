@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.request import Request, urlopen
 from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from codeyx.hooks.models import Action, ActionResult, HookContext
 
@@ -11,7 +11,9 @@ log = logging.getLogger(__name__)
 
 
 async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
-    command = ctx.expand(action.command)
+    # shell_quote=True: interpolated context values (e.g. $TOOL_ARGS.command)
+    # are quoted so they cannot inject additional shell syntax.
+    command = ctx.expand(action.command, shell_quote=True)
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -26,7 +28,7 @@ async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
             proc.kill()
             await proc.wait()
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return ActionResult(

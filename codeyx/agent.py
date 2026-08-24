@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
+import random
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -26,18 +29,17 @@ from codeyx.context import (
 from codeyx.conversation import ConversationManager, ToolResultBlock, ToolUseBlock
 from codeyx.conversation import ThinkingBlock as ConvThinkingBlock
 from codeyx.hooks import HookContext, HookEngine
+from codeyx.memory.auto_memory import MemoryManager
 from codeyx.permissions import (
     PermissionChecker,
     PermissionMode,
 )
 from codeyx.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
-from codeyx.memory.auto_memory import MemoryManager
 from codeyx.runtime import (
     AgentRuntimeState,
     ToolExecutionResult,
     ToolExecutionScheduler,
     ToolResultRecovery,
-    partition_tool_calls,
 )
 from codeyx.tools import ToolRegistry
 from codeyx.tools.base import (
@@ -54,6 +56,45 @@ from codeyx.tools.base import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget tasks: retrieve the exception so
+    asyncio doesn't log 'Task exception was never retrieved', and record it."""
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("Background task failed: %s", task.exception())
+
+
+PLAN_ADJECTIVES = [
+    "bold", "bright", "calm", "cool", "deep", "fair", "fast", "fine",
+    "glad", "keen", "kind", "lean", "mild", "neat", "pure", "safe",
+    "slim", "soft", "tall", "warm", "wise", "grand", "swift", "vivid",
+]
+PLAN_NOUNS = [
+    "sketch", "draft", "spark", "bloom", "trail", "ridge", "creek", "grove",
+    "cliff", "cloud", "field", "forge", "frost", "haven", "pearl", "stone",
+    "storm", "river", "tower", "delta", "flame", "orbit", "pulse", "shore",
+]
+
+_SHELL_METACHARS = frozenset(";|&$`><\n\r")
+
+
+def _persist_allow_always_rule(
+    checker: PermissionChecker, tool_name: str, arguments: dict[str, Any]
+) -> None:
+    """Persist a user's "always allow" answer as a local prefix rule — but
+    only for metacharacter-free content. "Bash(echo hi*)" must not grow into
+    a standing allow for "echo hi; <anything>": the rule layer does no shell
+    screening of its own."""
+    from codeyx.permissions.rules import Rule, extract_content
+
+    content = extract_content(tool_name, arguments)
+    if _SHELL_METACHARS.intersection(content):
+        return
+    pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
+    checker.rule_engine.append_local_rule(
+        Rule(tool_name=tool_name, pattern=pattern, effect="allow")
+    )
 
 MEMORY_EXTRACTION_INTERVAL = 5
 MAX_TOKENS_CEILING = 64000
@@ -269,6 +310,9 @@ class Agent:
         self.coordinator_mode: bool = False
         self.team_name: str = ""
         self._team_manager: Any = None
+        # Strong ref to the in-flight memory-extraction task; asyncio keeps
+        # only weak references, so an unreferenced task can be GC'd mid-run.
+        self._memory_task: asyncio.Task | None = None
 
     @property
     def plan_mode(self) -> bool:
@@ -279,18 +323,10 @@ class Agent:
     def _get_plan_path(self) -> Path:
         if self._plan_path_cache is not None:
             return self._plan_path_cache
-        import random
-        import datetime
-        _ADJECTIVES = ["bold", "bright", "calm", "cool", "deep", "fair", "fast", "fine",
-                       "glad", "keen", "kind", "lean", "mild", "neat", "pure", "safe",
-                       "slim", "soft", "tall", "warm", "wise", "grand", "swift", "vivid"]
-        _NOUNS = ["sketch", "draft", "spark", "bloom", "trail", "ridge", "creek", "grove",
-                  "cliff", "cloud", "field", "forge", "frost", "haven", "pearl", "stone",
-                  "storm", "river", "tower", "delta", "flame", "orbit", "pulse", "shore"]
         plans_dir = Path(self.work_dir) / ".codeyx" / "plans"
         plans_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%m%d-%H%M")
-        slug = f"{random.choice(_ADJECTIVES)}-{random.choice(_NOUNS)}-{ts}"
+        slug = f"{random.choice(PLAN_ADJECTIVES)}-{random.choice(PLAN_NOUNS)}-{ts}"
         self._plan_path_cache = plans_dir / f"{slug}.md"
         return self._plan_path_cache
 
@@ -558,7 +594,12 @@ class Agent:
                     self._loop_count % MEMORY_EXTRACTION_INTERVAL == 0
                     and self.memory_manager
                 ):
-                    asyncio.ensure_future(self._extract_memories(conversation))
+                    # Keep a reference so the event loop cannot GC the task
+                    # mid-flight (asyncio only holds weak refs).
+                    self._memory_task = asyncio.ensure_future(
+                        self._extract_memories(conversation)
+                    )
+                    self._memory_task.add_done_callback(_log_task_exception)
                 if self.hook_engine:
                     ctx = self._build_hook_context("turn_end")
                     await self.hook_engine.run_hooks("turn_end", ctx)
@@ -612,6 +653,8 @@ class Agent:
                     )
                     for br in batch_results:
                         runtime_state.record_tool_result(br.is_unknown)
+                        for he in self._drain_hook_events():
+                            yield he
                         content = self._maybe_persist_or_truncate(
                             br.tool_id, br.result
                         )
@@ -635,40 +678,29 @@ class Agent:
                         elapsed = 0.0
                         is_unknown = False
 
-                        if self.hook_engine:
-                            file_path = self._infer_file_path(tc.arguments)
-                            hook_ctx = self._build_hook_context(
-                                "pre_tool_use",
-                                tool_name=tc.tool_name,
-                                tool_args=tc.arguments,
-                                file_path=file_path,
+                        rejected = await self._run_pre_tool_hooks(tc)
+                        for he in self._drain_hook_events():
+                            yield he
+                        if rejected is not None:
+                            result = rejected
+                            content = self._maybe_persist_or_truncate(
+                                tc.tool_id, result
                             )
-                            rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
-                            for he in self._drain_hook_events():
-                                yield he
-                            if rejection is not None:
-                                result = ToolResult(
-                                    output=f"Hook rejected: {rejection.reason}",
+                            tool_results.append(
+                                ToolResultBlock(
+                                    tool_use_id=tc.tool_id,
+                                    content=content,
                                     is_error=True,
                                 )
-                                content = self._maybe_persist_or_truncate(
-                                    tc.tool_id, result
-                                )
-                                tool_results.append(
-                                    ToolResultBlock(
-                                        tool_use_id=tc.tool_id,
-                                        content=content,
-                                        is_error=True,
-                                    )
-                                )
-                                yield ToolResultEvent(
-                                    tool_id=tc.tool_id,
-                                    tool_name=tc.tool_name,
-                                    output=result.output,
-                                    is_error=True,
-                                    elapsed=0.0,
-                                )
-                                continue
+                            )
+                            yield ToolResultEvent(
+                                tool_id=tc.tool_id,
+                                tool_name=tc.tool_name,
+                                output=result.output,
+                                is_error=True,
+                                elapsed=0.0,
+                            )
+                            continue
 
                         async for item in self._execute_tool(tc):
                             if isinstance(item, PermissionRequest):
@@ -683,17 +715,9 @@ class Agent:
 
                         runtime_state.record_tool_result(is_unknown)
 
-                        if self.hook_engine:
-                            file_path = self._infer_file_path(tc.arguments)
-                            hook_ctx = self._build_hook_context(
-                                "post_tool_use",
-                                tool_name=tc.tool_name,
-                                tool_args=tc.arguments,
-                                file_path=file_path,
-                            )
-                            await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
-                            for he in self._drain_hook_events():
-                                yield he
+                        await self._notify_post_tool_hooks(tc)
+                        for he in self._drain_hook_events():
+                            yield he
 
                         content = self._maybe_persist_or_truncate(
                             tc.tool_id, result
@@ -786,9 +810,66 @@ class Agent:
         self._snapshot_for_recovery(tc, result)
         return result
 
+    async def _run_pre_tool_hooks(self, tc: ToolCallComplete) -> ToolResult | None:
+        """Fire pre_tool_use hooks. Returns a rejection ToolResult or None."""
+        if not self.hook_engine:
+            return None
+        file_path = self._infer_file_path(tc.arguments)
+        hook_ctx = self._build_hook_context(
+            "pre_tool_use",
+            tool_name=tc.tool_name,
+            tool_args=tc.arguments,
+            file_path=file_path,
+        )
+        rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
+        if rejection is not None:
+            return ToolResult(output=f"Hook rejected: {rejection.reason}", is_error=True)
+        return None
+
+    async def _notify_post_tool_hooks(self, tc: ToolCallComplete) -> None:
+        if not self.hook_engine:
+            return
+        file_path = self._infer_file_path(tc.arguments)
+        hook_ctx = self._build_hook_context(
+            "post_tool_use",
+            tool_name=tc.tool_name,
+            tool_args=tc.arguments,
+            file_path=file_path,
+        )
+        await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
+
+    def _noninteractive_permission_denial(
+        self, tool: Any, tc: ToolCallComplete, allow_ask: bool
+    ) -> ToolResult | None:
+        """Permission verdict for contexts that cannot yield a PermissionRequest
+        (concurrent batches, sub-agents). Returns a denial ToolResult, or None
+        when execution may proceed. `allow_ask` auto-approves `ask` decisions —
+        reserved for agents explicitly running in DONT_ASK mode."""
+        if self.permission_checker is None:
+            return None
+        decision = self.permission_checker.check(tool, tc.arguments)
+        if decision.effect == "deny":
+            return ToolResult(
+                output=f"Permission denied: {decision.reason}",
+                is_error=True,
+            )
+        if decision.effect == "ask" and not allow_ask:
+            return ToolResult(
+                output=(
+                    "Permission denied: this action requires user confirmation, "
+                    "which is unavailable in this execution context. "
+                    "Run it as a standalone (non-parallel) tool call."
+                ),
+                is_error=True,
+            )
+        return None
+
     async def _execute_single_tool_direct(
         self, tc: ToolCallComplete
     ) -> ToolExecutionResult:
+        """Executor for concurrent batches. Applies the SAME hook + permission
+        gates as the interactive serial path; `ask` outcomes are denied because
+        a gather() context cannot surface a permission dialog."""
         start = time.monotonic()
         tool, error, is_unknown = self._resolve_tool(tc)
         if error is not None:
@@ -800,7 +881,28 @@ class Agent:
                 is_unknown=is_unknown,
             )
 
+        rejected = await self._run_pre_tool_hooks(tc)
+        if rejected is not None:
+            return ToolExecutionResult(
+                tool_id=tc.tool_id,
+                tool_name=tc.tool_name,
+                result=rejected,
+                elapsed=time.monotonic() - start,
+                is_unknown=False,
+            )
+
+        denied = self._noninteractive_permission_denial(tool, tc, allow_ask=False)
+        if denied is not None:
+            return ToolExecutionResult(
+                tool_id=tc.tool_id,
+                tool_name=tc.tool_name,
+                result=denied,
+                elapsed=time.monotonic() - start,
+                is_unknown=False,
+            )
+
         result = await self._run_tool(tool, tc)
+        await self._notify_post_tool_hooks(tc)
         return ToolExecutionResult(
             tool_id=tc.tool_id,
             tool_name=tc.tool_name,
@@ -851,11 +953,9 @@ class Agent:
                     return
 
                 if response == PermissionResponse.ALLOW_ALWAYS:
-                    from codeyx.permissions.rules import Rule, extract_content
-                    content = extract_content(tc.tool_name, tc.arguments)
-                    pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
-                    rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
-                    self.permission_checker.rule_engine.append_local_rule(rule)
+                    _persist_allow_always_rule(
+                        self.permission_checker, tc.tool_name, tc.arguments
+                    )
 
         result = await self._run_tool(tool, tc)
         yield result, time.monotonic() - start, False
@@ -935,16 +1035,19 @@ class Agent:
         if conversation is None:
             conversation = ConversationManager()
 
-            env_context = build_environment_context(
-                self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
-            )
-            conversation.inject_environment(env_context)
+        # Built unconditionally: the post-compact path below re-injects
+        # env_context even for caller-supplied (fork/sub-agent) conversations.
+        # Injection itself is flag-guarded and idempotent.
+        env_context = build_environment_context(
+            self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
+        )
+        conversation.inject_environment(env_context)
 
-            if self.instructions_content:
-                memory_content = self.memory_manager.load() if self.memory_manager else ""
-                conversation.inject_long_term_memory(
-                    self.instructions_content, memory_content
-                )
+        if self.instructions_content:
+            memory_content = self.memory_manager.load() if self.memory_manager else ""
+            conversation.inject_long_term_memory(
+                self.instructions_content, memory_content
+            )
 
         if task:
             conversation.add_user_message(task)
@@ -989,6 +1092,11 @@ class Agent:
             )
             if isinstance(compact_result, CompactEvent):
                 conversation.inject_environment(env_context)
+                mem = self.memory_manager.load() if self.memory_manager else ""
+                conversation.inject_long_term_memory(
+                    self.instructions_content, mem
+                )
+                self._inject_skill_recommendations(conversation)
 
             deferred_names = self.registry.get_deferred_tool_names()
             if deferred_names:
@@ -1061,52 +1169,26 @@ class Agent:
     async def _execute_tool_noninteractive(
         self, tc: ToolCallComplete
     ) -> ToolResult:
+        """Tool pipeline for sub-agents / non-interactive runs. Same gates as
+        the interactive path, except an `ask` decision auto-approves only in
+        DONT_ASK mode and is denied otherwise (no user to prompt)."""
         tool, error, _ = self._resolve_tool(tc)
         if error is not None:
             return error
 
-        if self.hook_engine:
-            file_path = self._infer_file_path(tc.arguments)
-            hook_ctx = self._build_hook_context(
-                "pre_tool_use",
-                tool_name=tc.tool_name,
-                tool_args=tc.arguments,
-                file_path=file_path,
-            )
-            rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
-            if rejection is not None:
-                return ToolResult(
-                    output=f"Hook rejected: {rejection.reason}",
-                    is_error=True,
-                )
+        rejected = await self._run_pre_tool_hooks(tc)
+        if rejected is not None:
+            return rejected
 
-        if self.permission_checker:
-            decision = self.permission_checker.check(tool, tc.arguments)
-            if decision.effect == "deny":
-                return ToolResult(
-                    output=f"Permission denied: {decision.reason}",
-                    is_error=True,
-                )
-            if decision.effect == "ask":
-                if self.permission_mode == PermissionMode.DONT_ASK:
-                    pass  # auto-approve
-                else:
-                    return ToolResult(
-                        output="Permission denied: non-interactive agent cannot prompt user",
-                        is_error=True,
-                    )
+        denied = self._noninteractive_permission_denial(
+            tool, tc, allow_ask=self.permission_mode == PermissionMode.DONT_ASK
+        )
+        if denied is not None:
+            return denied
 
         result = await self._run_tool(tool, tc)
 
-        if self.hook_engine:
-            file_path = self._infer_file_path(tc.arguments)
-            hook_ctx = self._build_hook_context(
-                "post_tool_use",
-                tool_name=tc.tool_name,
-                tool_args=tc.arguments,
-                file_path=file_path,
-            )
-            await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
+        await self._notify_post_tool_hooks(tc)
 
         return result
 

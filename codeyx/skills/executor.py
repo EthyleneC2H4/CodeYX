@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING
 
 from codeyx.conversation import ConversationManager, Message
+from codeyx.permissions.modes import PermissionMode
 from codeyx.skills.parser import SkillDef, substitute_arguments
 from codeyx.tools import ToolRegistry
 
 if TYPE_CHECKING:
-    from codeyx.agent import Agent, AgentEvent
+    from codeyx.agent import Agent
     from codeyx.client import LLMClient
 
 log = logging.getLogger(__name__)
@@ -92,15 +93,28 @@ class SkillExecutor:
         except SkillDependencyError as e:
             return f"Skill execution failed: {e}"
 
-        from codeyx.agent import Agent as AgentClass, StreamText, LoopComplete, ErrorEvent
+        from codeyx.agent import Agent as AgentClass
+        from codeyx.agent import ErrorEvent, LoopComplete, StreamText
 
+        parent_checker = getattr(self.agent, "permission_checker", None)
         fork_agent = AgentClass(
             client=self.client,
             registry=filtered_registry,
             protocol=self.protocol,
             work_dir=self.agent.work_dir,
             max_iterations=self.agent.max_iterations,
-            permission_checker=None,
+            # Skill forks run the parent's tools — they must not bypass the
+            # permission system. DONT_ASK auto-approves `ask` verdicts since
+            # the fork cannot surface a dialog; deny/sandbox rules still bind.
+            permission_checker=(
+                parent_checker.derive(mode=PermissionMode.DONT_ASK)
+                if parent_checker is not None
+                else None
+            ),
+            # Forks must honor the session's hooks exactly like every other
+            # spawn path: pre_tool_use rejection and post_tool_use audit
+            # stay in force even though prompts are auto-approved.
+            hook_engine=getattr(self.agent, "hook_engine", None),
             context_window=self.agent.context_window,
         )
 

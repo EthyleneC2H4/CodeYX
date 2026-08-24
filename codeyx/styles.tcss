@@ -143,57 +143,6 @@ Screen { }
     color: $text-muted;
 }
 
-/* --- Plan Approval Dialog --- */
-
-PlanApprovalDialog {
-    align: center middle;
-}
-
-#plan-dialog {
-    width: 64;
-    height: auto;
-    padding: 1 2;
-    background: $surface;
-    border: solid $warning;
-}
-
-#plan-title {
-    text-style: bold;
-    text-align: center;
-    padding: 0 0 1 0;
-}
-
-#plan-dialog Button {
-    width: 100%;
-    margin: 0 0 1 0;
-}
-
-/* --- AskUser Dialog --- */
-
-AskUserDialog {
-    align: center middle;
-}
-
-#askuser-dialog {
-    width: 64;
-    height: auto;
-    max-height: 20;
-    padding: 1 2;
-    background: $surface;
-    border: solid $accent;
-}
-
-#askuser-title {
-    text-style: bold;
-    text-align: center;
-    padding: 0 0 1 0;
-}
-
-#askuser-options {
-    height: auto;
-    max-height: 12;
-}
-
 /* --- Inline Permission Widget --- */
 
 #perm-inline {

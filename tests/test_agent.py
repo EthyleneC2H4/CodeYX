@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -16,11 +17,11 @@ from codeyx.agent import (
     ToolUseEvent,
     TurnComplete,
     UsageEvent,
-    partition_tool_calls,
 )
-from codeyx.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
 from codeyx.client import LLMClient
 from codeyx.conversation import ConversationManager
+from codeyx.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
+from codeyx.runtime import partition_tool_calls
 from codeyx.tools import create_default_registry
 from codeyx.tools.base import (
     StreamEnd,

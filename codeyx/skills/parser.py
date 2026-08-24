@@ -63,6 +63,8 @@ def _validate_meta(meta: dict, source: str = "") -> None:
         raise SkillParseError(f"Missing required field 'name'{ctx}")
     if "description" not in meta:
         raise SkillParseError(f"Missing required field 'description'{ctx}")
+    if not isinstance(meta["description"], str):
+        raise SkillParseError(f"Field 'description' must be a string{ctx}")
 
     name = meta["name"]
     if not isinstance(name, str) or not VALID_NAME_RE.match(name):

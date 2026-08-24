@@ -8,17 +8,13 @@ from pathlib import Path
 
 import yaml
 
-log = logging.getLogger(__name__)
-
 from .validator import (
-    ConfigError,
     DEFAULT_CONTEXT_WINDOW,
-    VALID_PERMISSION_MODES,
-    VALID_PROTOCOLS,
-    VALID_TEAMMATE_MODES,
+    ConfigError,
     validate_config_structure,
 )
 
+log = logging.getLogger(__name__)
 
 _ENV_KEY_MAP = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -124,9 +120,11 @@ def _load_single_file(path: Path) -> AppConfig:
         ProviderConfig(
             name=p["name"],
             protocol=p["protocol"],
-            base_url=p["base_url"],
+            base_url=resolve_env_vars(p["base_url"]),
             model=p["model"],
-            api_key=p["api_key"],
+            # Support `api_key: "${ANTHROPIC_API_KEY}"` alongside the implicit
+            # per-protocol env lookup in resolve_api_key().
+            api_key=resolve_env_vars(p["api_key"]),
             thinking=p["thinking"],
             context_window=p["context_window"],
             max_output_tokens=p["max_output_tokens"],
@@ -190,6 +188,14 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
         base.teammate_mode = override.teammate_mode
     if override.enable_coordinator_mode:
         base.enable_coordinator_mode = True
+
+    wt_defaults = WorktreeConfig()
+    if override.worktree.symlink_directories != wt_defaults.symlink_directories:
+        base.worktree.symlink_directories = override.worktree.symlink_directories
+    if override.worktree.stale_cleanup_interval != wt_defaults.stale_cleanup_interval:
+        base.worktree.stale_cleanup_interval = override.worktree.stale_cleanup_interval
+    if override.worktree.stale_cutoff_hours != wt_defaults.stale_cutoff_hours:
+        base.worktree.stale_cutoff_hours = override.worktree.stale_cutoff_hours
     return base
 
 

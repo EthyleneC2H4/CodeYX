@@ -2,10 +2,10 @@
 """Tests for the five-layer permission system."""
 from __future__ import annotations
 
-import asyncio
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import pytest
 import yaml
@@ -25,7 +25,6 @@ from codeyx.agent import (
 from codeyx.client import LLMClient
 from codeyx.conversation import ConversationManager
 from codeyx.permissions import (
-    Decision,
     DangerousCommandDetector,
     PathSandbox,
     PermissionChecker,
@@ -661,3 +660,51 @@ async def test_e2e_user_denies_operation():
     assert "拒绝" in c["tool_result"][0].output
     assert len(c["loop"]) == 1
     assert c["loop"][0].total_turns == 2
+
+
+# ---------------------------------------------------------------------------
+# ALLOW_ALWAYS prefix-rule persistence (metacharacter guard)
+# ---------------------------------------------------------------------------
+
+class TestAllowAlwaysRulePersistence:
+    def _checker(self, tmp_path):
+        from codeyx.permissions.checker import PermissionChecker
+        from codeyx.permissions.dangerous import DangerousCommandDetector
+        from codeyx.permissions.rules import RuleEngine
+        from codeyx.permissions.sandbox import PathSandbox
+
+        return PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(project_root=tmp_path),
+            rule_engine=RuleEngine(local_rules_path=tmp_path / "rules.local.yaml"),
+        )
+
+    def test_persists_simple_command(self, tmp_path):
+        from codeyx.agent import _persist_allow_always_rule
+        from codeyx.permissions.rules import extract_content
+
+        checker = self._checker(tmp_path)
+        args = {"command": "echo hello"}
+        _persist_allow_always_rule(checker, "Bash", args)
+        assert (
+            checker.rule_engine.match("Bash", extract_content("Bash", args))
+            is not None
+        )
+
+    def test_refuses_metachar_content(self, tmp_path):
+        from codeyx.agent import _persist_allow_always_rule
+        from codeyx.permissions.rules import extract_content
+
+        checker = self._checker(tmp_path)
+        for payload in [
+            {"command": "echo hi; rm -rf ~"},
+            {"command": "cat x | sh"},
+            {"command": "echo $(dangerous)"},
+        ]:
+            _persist_allow_always_rule(checker, "Bash", payload)
+            assert (
+                checker.rule_engine.match(
+                    "Bash", extract_content("Bash", payload)
+                )
+                is None
+            )

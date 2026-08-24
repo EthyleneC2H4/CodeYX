@@ -46,6 +46,11 @@ def partition_tool_calls(
 class ToolExecutionScheduler:
     """Partitions and executes tool calls while preserving model call order."""
 
+    # Upper bound on tools actually running at once inside one batch; a
+    # 20-call ReadFile burst should not open 20 file handles + subprocesses
+    # simultaneously.
+    MAX_PARALLEL = 8
+
     def __init__(self, registry: ToolRegistry) -> None:
         self.registry = registry
 
@@ -59,8 +64,14 @@ class ToolExecutionScheduler:
     ) -> list[ToolExecutionResult]:
         if not calls:
             return []
+        sem = asyncio.Semaphore(self.MAX_PARALLEL)
+
+        async def _bounded(tc: ToolCallComplete) -> ToolExecutionResult:
+            async with sem:
+                return await executor(tc)
+
         results = await asyncio.gather(
-            *(executor(tc) for tc in calls),
+            *(_bounded(tc) for tc in calls),
             return_exceptions=True,
         )
         out: list[ToolExecutionResult] = []

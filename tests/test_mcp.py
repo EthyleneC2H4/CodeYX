@@ -2,19 +2,13 @@
 """Tests for the MCP Client system (Chapter 6)."""
 from __future__ import annotations
 
-import asyncio
-import os
 import textwrap
-import tempfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 
 from codeyx.config import (
-    AppConfig,
     ConfigError,
     MCPServerConfig,
     build_child_env,
@@ -174,8 +168,9 @@ class TestLoadConfigMCP:
 class TestMCPToolWrapper:
     def test_name_format(self) -> None:
         from mcp import types as mcp_types
-        from codeyx.mcp.tool_wrapper import MCPToolWrapper
+
         from codeyx.mcp.client import MCPClient
+        from codeyx.mcp.tool_wrapper import MCPToolWrapper
 
         tool_def = mcp_types.Tool(
             name="search_issues",
@@ -198,6 +193,7 @@ class TestMCPToolWrapper:
 
     def test_get_schema_uses_original_input_schema(self) -> None:
         from mcp import types as mcp_types
+
         from codeyx.mcp.tool_wrapper import MCPToolWrapper
 
         input_schema = {
@@ -224,6 +220,7 @@ class TestMCPToolWrapper:
 class TestExtractText:
     def test_text_content(self) -> None:
         from mcp import types as mcp_types
+
         from codeyx.mcp.tool_wrapper import _extract_text
 
         content = [
@@ -239,6 +236,7 @@ class TestExtractText:
 
     def test_image_content(self) -> None:
         from mcp import types as mcp_types
+
         from codeyx.mcp.tool_wrapper import _extract_text
 
         content = [mcp_types.ImageContent(type="image", data="...", mimeType="image/png")]
@@ -269,7 +267,7 @@ class TestMCPManagerPartialFailure:
 
         registry = ToolRegistry()
 
-        with patch("codeyx.mcp.manager.MCPClient") as MockClient:
+        with patch("codeyx.mcp.manager.MCPClient") as mock_client_cls:  # noqa: N806
             good_instance = AsyncMock()
             good_instance.is_alive = True
 
@@ -290,7 +288,7 @@ class TestMCPManagerPartialFailure:
                     return bad_instance
                 return good_instance
 
-            MockClient.side_effect = make_client
+            mock_client_cls.side_effect = make_client
 
             errors = await manager.register_all_tools(registry)
 

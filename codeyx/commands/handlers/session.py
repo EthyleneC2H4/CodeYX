@@ -55,9 +55,9 @@ async def handle_session(ctx: CommandContext) -> None:
                 title = m.title or "(未命名)"
                 lines.append(f"  {i}. [{m.id[:8]}]  {title}  ({m.message_count} msgs, {ts})")
             ctx.ui.add_system_message("\n".join(lines))
-            ctx.config["_resume_candidates"] = [m.id for m in metas[:15]]
+            ctx.config["resume_candidates"][:] = [m.id for m in metas[:15]]
             return
-        candidates = ctx.config.get("_resume_candidates", [])
+        candidates = ctx.config.get("resume_candidates", [])
         if session_id.isdigit() and candidates:
             idx = int(session_id) - 1
             if 0 <= idx < len(candidates):

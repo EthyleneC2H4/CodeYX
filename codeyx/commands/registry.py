@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Awaitable, Callable, Protocol
+from enum import StrEnum
+from typing import Any, Protocol
 
 
-class CommandType(str, Enum):
+class CommandType(StrEnum):
     LOCAL = "local"
     LOCAL_UI = "local_ui"
     PROMPT = "prompt"
@@ -85,6 +86,16 @@ class CommandRegistry:
         self._commands[command.name] = command
         for alias in command.aliases:
             self._alias_map[alias] = command.name
+
+
+    def unregister(self, name: str) -> bool:
+        """Remove a command and any aliases pointing at it. Returns True when
+        a command was removed."""
+        removed = self._commands.pop(name, None) is not None
+        self._alias_map = {
+            k: v for k, v in self._alias_map.items() if v != name
+        }
+        return removed
 
 
     def find(self, name: str) -> Command | None:

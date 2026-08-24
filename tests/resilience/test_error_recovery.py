@@ -6,13 +6,10 @@ conditions rather than crashing or entering undefined states.
 
 from __future__ import annotations
 
-import asyncio
-import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-import pytest
-
-from codeyx.agent import Agent, ErrorEvent, StreamText, ToolResultEvent, ToolUseEvent
+from codeyx.agent import Agent, ErrorEvent, StreamText, ToolResultEvent
 from codeyx.client import LLMClient
 from codeyx.context.manager import CompactCircuitBreaker
 from codeyx.conversation import ConversationManager
@@ -23,9 +20,7 @@ from codeyx.tools.base import (
     TextDelta,
     ToolCallComplete,
     ToolCallStart,
-    ToolResult,
 )
-
 
 # ============================================================================
 # Malformed LLM response scenarios

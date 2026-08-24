@@ -22,11 +22,7 @@ def register_skill_commands(
     executor: SkillExecutor | None = None,
 ) -> None:
     for name in list(_REGISTERED_SKILL_NAMES):
-        if registry.find(name) is not None:
-            registry._commands.pop(name, None)
-            registry._alias_map = {
-                k: v for k, v in registry._alias_map.items() if v != name
-            }
+        registry.unregister(name)
         _REGISTERED_SKILL_NAMES.discard(name)
 
     for skill_name, skill_desc in loader.get_catalog():

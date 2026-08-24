@@ -61,6 +61,7 @@ class SharedTaskStore:
         blocked_by: list[str] | None = None,
         created_by: str = "",
     ) -> SharedTask:
+        self._load()
         task_id = str(self._next_id)
         self._next_id += 1
         task = SharedTask(

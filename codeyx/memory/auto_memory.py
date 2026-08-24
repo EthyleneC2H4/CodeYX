@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from codeyx.conversation import ConversationManager, Message
 from codeyx.skills.parser import parse_frontmatter
@@ -389,7 +389,7 @@ class MemoryManager:
     @staticmethod
     def _write_memory_directory(directory: Path, sections: list[str]) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(timezone.utc).date().isoformat()
+        now = datetime.now(UTC).date().isoformat()
         index_lines = ["# Memory Index", ""]
 
         for section in sections:
@@ -431,7 +431,10 @@ class MemoryManager:
         user_sections: list[str],
         project_sections: list[str],
     ) -> None:
-        real_lines = [l for l in lines if l.strip().startswith("- ") and not MemoryManager._is_placeholder(l)]
+        real_lines = [
+            ln for ln in lines
+            if ln.strip().startswith("- ") and not MemoryManager._is_placeholder(ln)
+        ]
         if not real_lines:
             return
 

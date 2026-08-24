@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 
-class BackendType(str, Enum):
+class BackendType(StrEnum):
     TMUX = "tmux"
     ITERM2 = "iterm2"
     IN_PROCESS = "in-process"

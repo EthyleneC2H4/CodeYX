@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack
 from typing import Any
@@ -12,6 +13,11 @@ from mcp.client.streamable_http import streamable_http_client
 from codeyx.config import MCPServerConfig, build_child_env, resolve_env_vars
 
 logger = logging.getLogger(__name__)
+
+# IPC guard rails: a wedged MCP server (hung child process, dead HTTP
+# endpoint) must fail a call instead of stalling the agent loop forever.
+CONNECT_TIMEOUT_S = 30.0
+CALL_TIMEOUT_S = 120.0
 
 
 class MCPClient:
@@ -44,11 +50,16 @@ class MCPClient:
             session = await self._stack.enter_async_context(
                 ClientSession(read, write)
             )
-            await session.initialize()
+            # initialize() performs the handshake over the just-spawned
+            # transport; bound it so a server that never responds fails
+            # connect instead of hanging startup.
+            await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_S)
             self._session = session
             self._alive = True
             logger.info("MCP server '%s' connected", self.name)
-        except Exception:
+        except BaseException:
+            # BaseException: cancelled connects must also tear down the
+            # stack, otherwise the stdio child process leaks as a zombie.
             await self._cleanup_stack()
             raise
 
@@ -89,7 +100,9 @@ class MCPClient:
 
     async def list_tools(self) -> list[types.Tool]:
         assert self._session is not None
-        result = await self._session.list_tools()
+        result = await asyncio.wait_for(
+            self._session.list_tools(), timeout=CALL_TIMEOUT_S
+        )
         return list(result.tools)
 
 
@@ -97,7 +110,9 @@ class MCPClient:
         self, name: str, arguments: dict[str, Any]
     ) -> types.CallToolResult:
         assert self._session is not None
-        return await self._session.call_tool(name, arguments)
+        return await asyncio.wait_for(
+            self._session.call_tool(name, arguments), timeout=CALL_TIMEOUT_S
+        )
 
     async def close(self) -> None:
         self._alive = False

@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -305,7 +302,7 @@ class TestWorktreeManager:
 
     def test_exit_remove_clean(self, manager):
         loop = asyncio.get_event_loop()
-        wt = loop.run_until_complete(manager.create("exit-rm"))
+        loop.run_until_complete(manager.create("exit-rm"))
         loop.run_until_complete(manager.enter("exit-rm"))
         loop.run_until_complete(
             manager.exit("exit-rm", action="remove", discard_changes=True)

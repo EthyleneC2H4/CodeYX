@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ class ExpectedOutcome:
 @dataclass
 class HarnessScenario:
     task: str
+    protocol: str = "anthropic"
     files: dict[str, str] = field(default_factory=dict)
     llm_script: list[list[dict[str, Any]]] = field(default_factory=list)
     expected: ExpectedOutcome = field(default_factory=ExpectedOutcome)
@@ -50,7 +51,7 @@ class ScenarioRunner:
         agent = Agent(
             client=client,
             registry=create_default_registry(),
-            protocol="anthropic",
+            protocol=scenario.protocol,
             work_dir=str(self.work_dir),
             max_iterations=max(1, len(scenario.llm_script) + 1),
         )

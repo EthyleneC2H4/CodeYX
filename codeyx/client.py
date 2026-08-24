@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -20,7 +21,6 @@ from codeyx.tools.base import (
     ToolCallDelta,
     ToolCallStart,
 )
-
 
 _EPHEMERAL = {"type": "ephemeral"}
 

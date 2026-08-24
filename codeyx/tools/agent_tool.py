@@ -10,6 +10,7 @@ from codeyx.tools.base import Tool, ToolResult
 if TYPE_CHECKING:
     from codeyx.agent import Agent
     from codeyx.agents.loader import AgentLoader
+    from codeyx.agents.parser import AgentDef
     from codeyx.agents.task_manager import TaskManager
     from codeyx.agents.trace import TraceManager
     from codeyx.client import LLMClient
@@ -87,8 +88,16 @@ class AgentTool(Tool):
         if p.team_name:
             return await self._execute_as_teammate(p)
 
-        isolation = ""
-        if p.subagent_type:
+        if p.isolation not in (None, "", "worktree"):
+            return ToolResult(
+                output=(f"Unsupported isolation mode '{p.isolation}'. "
+                        "Supported values: worktree."),
+                is_error=True,
+            )
+
+        # Explicit caller request wins over the agent definition's default.
+        isolation = p.isolation or ""
+        if not isolation and p.subagent_type:
             defn = self._agent_loader.get(p.subagent_type)
             if defn and defn.isolation:
                 isolation = defn.isolation
@@ -96,10 +105,10 @@ class AgentTool(Tool):
         if isolation == "worktree":
             return await self._execute_with_worktree(p)
 
+        from codeyx.agent import Agent as AgentClass
         from codeyx.agents.fork import ForkError, build_forked_messages
         from codeyx.agents.parser import AgentDef
         from codeyx.agents.tool_filter import resolve_agent_tools
-        from codeyx.agent import Agent as AgentClass
         from codeyx.conversation import ConversationManager
         from codeyx.permissions import (
             DangerousCommandDetector,
@@ -172,12 +181,18 @@ class AgentTool(Tool):
             PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
             PermissionMode.DEFAULT,
         )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(self._parent_agent.work_dir),
-            rule_engine=RuleEngine(),
-            mode=pm_enum,
-        )
+        parent_checker = getattr(self._parent_agent, "permission_checker", None)
+        if parent_checker is not None:
+            # Inherit the parent's detector/sandbox/rule engine so sub-agents
+            # are governed by the same rules as the parent.
+            checker = parent_checker.derive(mode=pm_enum)
+        else:
+            checker = PermissionChecker(
+                detector=DangerousCommandDetector(),
+                sandbox=PathSandbox(self._parent_agent.work_dir),
+                rule_engine=RuleEngine(),
+                mode=pm_enum,
+            )
 
         # Create sub-agent
         sub_agent = AgentClass(
@@ -259,10 +274,10 @@ class AgentTool(Tool):
         if self._worktree_manager is None:
             return ToolResult(output="WorktreeManager not configured for team spawn.", is_error=True)
 
+        from codeyx.agent import Agent as AgentClass
         from codeyx.agents.fork import ForkError, build_forked_messages
         from codeyx.agents.parser import AgentDef
         from codeyx.agents.tool_filter import build_teammate_tools
-        from codeyx.agent import Agent as AgentClass
         from codeyx.conversation import ConversationManager
         from codeyx.permissions import (
             DangerousCommandDetector,
@@ -369,12 +384,18 @@ class AgentTool(Tool):
         # 6. Create sub-agent with teammate addendum
         instructions = (definition.system_prompt or "") + TEAMMATE_ADDENDUM
 
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
-            mode=PermissionMode.DONT_ASK,
-        )
+        parent_checker = getattr(self._parent_agent, "permission_checker", None)
+        if parent_checker is not None:
+            checker = parent_checker.derive(
+                mode=PermissionMode.DONT_ASK, project_root=wt.path
+            )
+        else:
+            checker = PermissionChecker(
+                detector=DangerousCommandDetector(),
+                sandbox=PathSandbox(wt.path),
+                rule_engine=RuleEngine(),
+                mode=PermissionMode.DONT_ASK,
+            )
 
         sub_agent = AgentClass(
             client=client,
@@ -390,6 +411,10 @@ class AgentTool(Tool):
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
         sub_agent.agent_id = agent_id
+        # Wire the mailbox so _consume_mailbox actually drains this
+        # teammate's inbox on every turn (otherwise team messages are dead).
+        sub_agent.team_name = p.team_name
+        sub_agent._team_manager = self._team_manager
 
         # 7. Register name and member
         AgentNameRegistry.instance().register(teammate_name, agent_id)
@@ -464,6 +489,7 @@ class AgentTool(Tool):
                     model=p.model or "",
                     mailbox_dir=mailbox_dir,
                 )
+                self._team_manager.register_pane_id(agent_id, pane_info.pane_id)
         except Exception as e:
             log.warning("Pane spawn failed, falling back to in-process: %s", e)
             return ToolResult(
@@ -487,8 +513,6 @@ class AgentTool(Tool):
         params: AgentToolParams,
         definition: AgentDef,
     ) -> LLMClient:
-        from codeyx.agents.parser import AgentDef
-
         model_override = params.model or (
             definition.model if definition.model != "inherit" else None
         )
@@ -508,10 +532,9 @@ class AgentTool(Tool):
                 is_error=True,
             )
 
+        from codeyx.agent import Agent as AgentClass
         from codeyx.agents.parser import AgentDef
         from codeyx.agents.tool_filter import resolve_agent_tools
-        from codeyx.agent import Agent as AgentClass
-        from codeyx.conversation import ConversationManager
         from codeyx.permissions import (
             DangerousCommandDetector,
             PathSandbox,
@@ -570,12 +593,16 @@ class AgentTool(Tool):
             PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
             PermissionMode.DEFAULT,
         )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
-            mode=pm_enum,
-        )
+        parent_checker = getattr(self._parent_agent, "permission_checker", None)
+        if parent_checker is not None:
+            checker = parent_checker.derive(mode=pm_enum, project_root=wt.path)
+        else:
+            checker = PermissionChecker(
+                detector=DangerousCommandDetector(),
+                sandbox=PathSandbox(wt.path),
+                rule_engine=RuleEngine(),
+                mode=pm_enum,
+            )
 
         sub_agent = AgentClass(
             client=client,
@@ -602,8 +629,22 @@ class AgentTool(Tool):
             result_text = await sub_agent.run_to_completion(task)
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
+            # The run failed but the worktree still needs its cleanup pass —
+            # otherwise an aborted sub-agent leaks a worktree + branch.
+            try:
+                cleanup = await self._worktree_manager.auto_cleanup(
+                    wt_name, wt.head_commit
+                )
+                kept_note = (
+                    f"\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
+                    if cleanup.kept
+                    else ""
+                )
+            except Exception as ce:
+                log.warning("Worktree auto-cleanup failed for %s: %s", wt_name, ce)
+                kept_note = ""
             return ToolResult(
-                output=f"Sub-agent in worktree failed: {e}",
+                output=f"Sub-agent in worktree failed: {e}{kept_note}",
                 is_error=True,
             )
 

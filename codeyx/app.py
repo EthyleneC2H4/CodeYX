@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
+import re
 import time as _time
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text as RichText
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message as TMessage
+from textual.theme import Theme
 from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
@@ -30,6 +34,12 @@ from codeyx.agent import (
     TurnComplete,
     UsageEvent,
 )
+from codeyx.agents.loader import AgentLoader
+from codeyx.agents.notification import inject_task_notifications
+from codeyx.agents.task_manager import TaskManager
+from codeyx.agents.trace import TraceManager
+from codeyx.askuser_dialog import InlineAskUserWidget
+from codeyx.cache import FileCache
 from codeyx.client import (
     AuthenticationError,
     LLMClient,
@@ -44,18 +54,21 @@ from codeyx.commands import (
 )
 from codeyx.commands.completion import CompletionPopup
 from codeyx.commands.handlers import register_all_commands
+from codeyx.commands.handlers.skill_register import register_skill_commands
+from codeyx.commands.handlers.tasks import create_tasks_command
+from codeyx.commands.handlers.worktree import create_worktree_command
 from codeyx.config import MCPServerConfig, ProviderConfig
-from codeyx.hooks import HookContext, HookEngine, load_hooks
 from codeyx.conversation import ConversationManager, Message
+from codeyx.hooks import HookContext, HookEngine
 from codeyx.mcp import MCPManager
 from codeyx.memory import (
     MemoryManager,
     Session,
     SessionManager,
-    build_time_gap_message,
     generate_session_summary,
     load_instructions,
 )
+from codeyx.permission_dialog import InlinePermissionWidget
 from codeyx.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -63,17 +76,9 @@ from codeyx.permissions import (
     PermissionMode,
     RuleEngine,
 )
-from codeyx.agents.loader import AgentLoader
-from codeyx.agents.task_manager import TaskManager
-from codeyx.agents.trace import TraceManager
-from codeyx.agents.notification import inject_task_notifications
-from codeyx.commands.handlers.tasks import create_tasks_command
+from codeyx.plan_dialog import InlinePlanWidget, PlanChoice
 from codeyx.skills.executor import SkillExecutor
 from codeyx.skills.loader import SkillLoader
-from codeyx.commands.handlers.skill_register import register_skill_commands
-from rich.text import Text as RichText
-from textual.theme import Theme
-from codeyx.cache import FileCache
 from codeyx.tools import ToolRegistry, create_default_registry
 from codeyx.tools.agent_tool import AgentTool
 from codeyx.tools.ask_user import AskUserEvent, AskUserTool
@@ -81,9 +86,15 @@ from codeyx.tools.impl.tool_search import ToolSearchTool
 from codeyx.tools.load_skill import LoadSkill
 from codeyx.worktree.cleanup import start_stale_cleanup_task
 from codeyx.worktree.manager import WorktreeManager
-from codeyx.commands.handlers.worktree import create_worktree_command
 
-import re
+log = logging.getLogger(__name__)
+
+
+def _log_task_exception(task: asyncio.Task[Any]) -> None:
+    """Done-callback so fire-and-forget tasks can't drop exceptions."""
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("Background task failed: %s", task.exception())
+
 
 MAX_TRUNCATED_LINES = 20
 MAX_AT_REF_BYTES = 10240
@@ -163,7 +174,7 @@ class ChatInput(TextArea):
         if self._history_file.exists():
             try:
                 lines = self._history_file.read_text(encoding="utf-8").splitlines()
-                self._history = [l for l in lines if l.strip()]
+                self._history = [ln for ln in lines if ln.strip()]
             except Exception:
                 pass
 
@@ -521,6 +532,7 @@ class CodeYXApp(App):
         worktree_config: Any = None,
         teammate_mode: str = "",
         enable_coordinator_mode: bool = False,
+        boot: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.providers = providers
@@ -532,6 +544,9 @@ class CodeYXApp(App):
         self._worktree_config = worktree_config
         self._teammate_mode = teammate_mode
         self._enable_coordinator_mode = enable_coordinator_mode
+        # CLI boot parameters (teammate pane launch): working directory,
+        # team membership, and an initial prompt to run after startup.
+        self._boot = boot or {}
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
@@ -548,8 +563,10 @@ class CodeYXApp(App):
         self._spinner_idx: int = 0
         self._spinner_timer = None
         self._agent_task: asyncio.Task[None] | None = None
-        self._subagent_task: asyncio.Task[None] | None = None
         self._subagent_start_time: float | None = None
+        # /session resume candidate ids, shared by reference across command
+        # invocations so "resume <n>" can resolve on the following command.
+        self._resume_candidates: list[str] = []
         self.session_manager: SessionManager | None = None
         self.session: Session | None = None
         self.memory_manager: MemoryManager | None = None
@@ -563,6 +580,9 @@ class CodeYXApp(App):
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
         self._notification_check_task: asyncio.Task[None] | None = None
+        self._boot_prompt_task: asyncio.Task[None] | None = None
+        self._pending_perm_request: Any = None
+        self._pending_askuser_event: Any = None
         self.worktree_manager: WorktreeManager | None = None
         self._stale_cleanup_task: asyncio.Task[None] | None = None
         self._current_streaming_label: Static | None = None
@@ -622,6 +642,10 @@ class CodeYXApp(App):
             return
 
         work_dir = os.getcwd()
+        boot_work_dir = self._boot.get("work_dir")
+        if boot_work_dir:
+            work_dir = os.path.abspath(os.path.expanduser(boot_work_dir))
+            os.chdir(work_dir)
         home = Path.home()
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
@@ -647,7 +671,10 @@ class CodeYXApp(App):
         self.registry.register(
             ToolSearchTool(self.registry, protocol=provider.protocol)
         )
-        self.registry.register(AskUserTool())
+        ask_user_tool = AskUserTool()
+        ask_user_tool.on_pending = self._handle_askuser
+        ask_user_tool.on_expired = self._handle_askuser_expired
+        self.registry.register(ask_user_tool)
 
         self.agent = Agent(
             client=self.client,
@@ -829,6 +856,19 @@ class CodeYXApp(App):
             self._start_notification_polling()
         )
 
+        # Teammate-pane boot: join the team (mailbox consumption) and run
+        # the initial prompt. _send_message waits for MCP init itself.
+        boot_team = self._boot.get("team")
+        if boot_team and self.agent is not None:
+            self.agent.team_name = boot_team
+            self.agent._team_manager = self.team_manager
+        boot_prompt = self._boot.get("prompt")
+        if boot_prompt and self.agent is not None:
+            self._boot_prompt_task = asyncio.create_task(
+                self._send_message(boot_prompt)
+            )
+            self._boot_prompt_task.add_done_callback(_log_task_exception)
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "provider-list":
             provider = self.providers[event.option_index]
@@ -883,6 +923,10 @@ class CodeYXApp(App):
                 "render_restored": self._render_restored_messages,
                 "skill_loader": self.skill_loader,
                 "skill_executor": self.skill_executor,
+                # Same list object across invocations: /session resume writes
+                # candidate ids here and reads them back on the next command.
+                # (A per-invocation dict would drop them between commands.)
+                "resume_candidates": self._resume_candidates,
             },
         )
 
@@ -1004,7 +1048,6 @@ class CodeYXApp(App):
                 block._render_expanded()
 
         for summary in self.query(ToolGroupSummary):
-            was_expanded = summary._expanded
             summary.toggle()
             parent = summary.parent
             if parent:
@@ -1024,20 +1067,32 @@ class CodeYXApp(App):
             self.query_one("#chat-input", ChatInput).focus()
             return
         if self._agent_task and not self._agent_task.done():
-            if self._subagent_task and not self._subagent_task.done():
-                task_id = self.task_manager.adopt_running(
-                    self._subagent_task, "background task"
-                ) if hasattr(self.task_manager, 'adopt_running') else None
-                if task_id:
-                    self._show_system_message(
-                        f"Task moved to background (id: {task_id})"
-                    )
-                    return
+            # Cancelling mid-prompt must also dismiss the dialog: otherwise
+            # the widget stays mounted with input disabled and the UI locks.
+            self._dismiss_pending_dialogs()
             self._agent_task.cancel()
 
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
         assert self.agent is not None
 
+        # Register whatever task is running this turn with the interrupt
+        # paths (Escape / Ctrl+C / typed input). Callers usually assign
+        # _agent_task themselves, but the boot-prompt path does not — without
+        # this a teammate pane's first turn could not be cancelled, and a
+        # message typed during it would start a second concurrent loop.
+        current = asyncio.current_task()
+        if current is not None:
+            self._agent_task = current
+
+        try:
+            await self._send_message_inner(text, is_notification)
+        finally:
+            if current is not None and self._agent_task is current:
+                self._agent_task = None
+
+    async def _send_message_inner(
+        self, text: str, is_notification: bool = False
+    ) -> None:
         if self._mcp_init_task and not self._mcp_init_task.done():
             self._show_system_message("Waiting for MCP servers to connect...")
             await self._mcp_init_task
@@ -1052,7 +1107,6 @@ class CodeYXApp(App):
         if text:
             user_row = Vertical(classes="user-row")
             await chat.mount(user_row)
-            from rich.text import Text as RichText
             user_rich = RichText()
             user_rich.append("❯ ", style="bold color(80)")
             user_rich.append(text, style="bold color(255)")
@@ -1109,7 +1163,6 @@ class CodeYXApp(App):
                         streaming_label = Static("", classes="message ai-message")
                         await ai_row.mount(streaming_label)
                     accumulated_text += event.text
-                    from rich.text import Text as RichText
                     t = RichText()
                     t.append("● ", style="bold color(99)")
                     t.append(accumulated_text)
@@ -1122,7 +1175,6 @@ class CodeYXApp(App):
                 elif isinstance(event, ToolUseEvent):
                     if accumulated_text:
                         await streaming_label.remove()
-                        from rich.text import Text as RichText
                         prefix = Static(RichText("●  ", style="bold color(99)"), classes="message")
                         await ai_row.mount(prefix)
                         md = Markdown(accumulated_text, classes="message ai-message")
@@ -1157,10 +1209,6 @@ class CodeYXApp(App):
                     if block:
                         block.set_result(event.output, event.is_error, event.elapsed)
                     chat.scroll_end(animate=False)
-
-                    ask_tool = self.registry.get("AskUserQuestion")
-                    if ask_tool and isinstance(ask_tool, AskUserTool) and ask_tool._pending_event:
-                        await self._handle_askuser(ask_tool._pending_event)
 
                 elif isinstance(event, TurnComplete):
                     if self.session:
@@ -1208,8 +1256,8 @@ class CodeYXApp(App):
                     self._show_error(event.message)
 
                 elif isinstance(event, LoopComplete):
-                    total_time = _time.monotonic() - self._thinking_start
                     if self._thinking and self._thinking_label is not None:
+                        total_time = _time.monotonic() - self._thinking_start
                         self._stop_spinner()
                         past = _to_past_tense(self._thinking_verb)
                         self._thinking_label.update(
@@ -1218,12 +1266,6 @@ class CodeYXApp(App):
                         self._thinking_label.add_class("thinking-done")
                         self._thinking = False
                         self._thinking_label = None
-                    else:
-                        done_label = Static(
-                            f"✻ {_to_past_tense(self._thinking_verb)} for {total_time:.1f}s",
-                            classes="message thinking-done",
-                        )
-                        await ai_row.mount(done_label)
                     if self.session:
                         for msg in self.conversation.history[history_cursor:]:
                             self.session.append(msg)
@@ -1297,8 +1339,6 @@ class CodeYXApp(App):
                 await self._process_task_notifications()
 
     async def _show_plan_approval(self) -> None:
-        from codeyx.plan_dialog import InlinePlanWidget
-
         chat = self.query_one("#chat-area", VerticalScroll)
         widget = InlinePlanWidget()
         await chat.mount(widget)
@@ -1309,10 +1349,8 @@ class CodeYXApp(App):
             pass
 
     def on_inline_plan_widget_responded(
-        self, event: "InlinePlanWidget.Responded"
+        self, event: InlinePlanWidget.Responded
     ) -> None:
-        from codeyx.plan_dialog import InlinePlanWidget, PlanChoice
-
         try:
             self.query_one("#plan-inline", InlinePlanWidget).remove()
         except Exception:
@@ -1353,8 +1391,6 @@ class CodeYXApp(App):
                 self._show_system_message("Type your feedback and send.")
 
     async def _handle_askuser(self, event: AskUserEvent) -> None:
-        from codeyx.askuser_dialog import InlineAskUserWidget
-
         chat = self.query_one("#chat-area", VerticalScroll)
         widget = InlineAskUserWidget(event.questions)
         self._pending_askuser_event = event
@@ -1365,11 +1401,24 @@ class CodeYXApp(App):
         except Exception:
             pass
 
-    def on_inline_ask_user_widget_responded(
-        self, event: "InlineAskUserWidget.Responded"
-    ) -> None:
-        from codeyx.askuser_dialog import InlineAskUserWidget
+    async def _handle_askuser_expired(self, event: AskUserEvent) -> None:
+        """Timeout path: the tool gave up waiting, so unmount the dialog and
+        re-enable input — otherwise they stay stuck for the rest of the turn."""
+        if getattr(self, "_pending_askuser_event", None) is event:
+            self._pending_askuser_event = None
+        try:
+            await self.query_one("#askuser-inline", InlineAskUserWidget).remove()
+        except Exception:
+            pass
+        try:
+            self.query_one("#chat-input").disabled = False
+            self.query_one("#chat-input").focus()
+        except Exception:
+            pass
 
+    def on_inline_ask_user_widget_responded(
+        self, event: InlineAskUserWidget.Responded
+    ) -> None:
         req = getattr(self, "_pending_askuser_event", None)
         if req is not None and not req.future.done():
             req.future.set_result(event.answers if event.answers else {})
@@ -1406,9 +1455,40 @@ class CodeYXApp(App):
                 f"  {frame} {self._thinking_verb}…  ({elapsed:.0f}s)"
             )
 
-    async def _handle_permission_request(self, request: PermissionRequest) -> None:
-        from codeyx.permission_dialog import InlinePermissionWidget
+    def _dismiss_pending_dialogs(self, response: Any = None) -> None:
+        """Resolve any pending permission/AskUser future and unmount its
+        dialog. Used on cancel so a dead agent task cannot leave the input
+        permanently disabled behind an orphaned prompt."""
 
+        req = getattr(self, "_pending_perm_request", None)
+        if req is not None:
+            if not req.future.done():
+                req.future.set_result(response or PermissionResponse.DENY)
+            self._pending_perm_request = None
+        ask_req = getattr(self, "_pending_askuser_event", None)
+        if ask_req is not None:
+            if not ask_req.future.done():
+                ask_req.future.set_result({})
+            self._pending_askuser_event = None
+
+        async def _remove_dialogs() -> None:
+            for selector, wtype in (
+                ("#perm-inline", InlinePermissionWidget),
+                ("#askuser-inline", InlineAskUserWidget),
+            ):
+                try:
+                    await self.query_one(selector, wtype).remove()
+                except Exception:
+                    pass
+            try:
+                self.query_one("#chat-input").disabled = False
+                self.query_one("#chat-input").focus()
+            except Exception:
+                pass
+
+        asyncio.ensure_future(_remove_dialogs())
+
+    async def _handle_permission_request(self, request: PermissionRequest) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
         widget = InlinePermissionWidget(request.tool_name, request.description)
         self._pending_perm_request = request
@@ -1421,10 +1501,8 @@ class CodeYXApp(App):
             pass
 
     def on_inline_permission_widget_responded(
-        self, event: "InlinePermissionWidget.Responded"
+        self, event: InlinePermissionWidget.Responded
     ) -> None:
-        from codeyx.permission_dialog import InlinePermissionWidget
-
         req = getattr(self, "_pending_perm_request", None)
         if req is not None:
             req.future.set_result(event.response)
@@ -1531,6 +1609,13 @@ class CodeYXApp(App):
             )
 
     async def _shutdown_mcp(self) -> None:
+        if self._boot_prompt_task is not None and not self._boot_prompt_task.done():
+            self._boot_prompt_task.cancel()
+            try:
+                await self._boot_prompt_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._boot_prompt_task = None
         if self._mcp_init_task is not None:
             self._mcp_init_task.cancel()
             try:
@@ -1549,6 +1634,7 @@ class CodeYXApp(App):
     async def action_handle_ctrl_c(self) -> None:
         if self._streaming:
             if self._agent_task and not self._agent_task.done():
+                self._dismiss_pending_dialogs()
                 self._agent_task.cancel()
             self._show_system_message("(response interrupted)")
             self._streaming = False
@@ -1574,7 +1660,7 @@ class CodeYXApp(App):
                     self.agent._extract_memories(self.conversation),
                     timeout=10.0,
                 )
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 pass
 
         if self.hook_engine:
@@ -1599,11 +1685,24 @@ class CodeYXApp(App):
                     pass
 
         if self.worktree_manager:
+            # Never silently destroy uncommitted work at shutdown: clean
+            # worktrees are removed, dirty ones are kept on disk with a
+            # logged pointer so the user can recover them.
             for wt in list(self.worktree_manager.active.values()):
                 try:
-                    await self.worktree_manager._remove_worktree(wt.name, wt)
-                except Exception:
-                    pass
+                    from codeyx.worktree.changes import count_worktree_changes
+
+                    changes = count_worktree_changes(wt.path, wt.head_commit)
+                    if changes.uncommitted > 0 or changes.new_commits > 0:
+                        log.warning(
+                            "Keeping worktree '%s' (%s): %d uncommitted change(s), "
+                            "%d new commit(s)",
+                            wt.name, wt.path, changes.uncommitted, changes.new_commits,
+                        )
+                        continue
+                    await self.worktree_manager.remove_worktree(wt.name, wt)
+                except Exception as e:
+                    log.warning("Worktree shutdown cleanup failed for %s: %s", wt.name, e)
 
         if self.session:
             self.session.close()

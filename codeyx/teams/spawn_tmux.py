@@ -38,22 +38,22 @@ def build_cli_command(
     model: str = "",
     mailbox_dir: str = "",
 ) -> str:
-    parts = ["codeyx", "-p"]
-    parts.extend(["--work-dir", worktree_path])
-    if agent_type:
-        parts.extend(["--agent-type", agent_type])
-    if model:
-        parts.extend(["--model", model])
-    env_parts = [
-        f"CODEX_TEAM_NAME={team_name}",
-        f"CODEX_TEAMMATE_NAME={teammate_name}",
+    """Build the shell command for a teammate pane. Only uses flags that
+    actually exist in codeyx/__main__.py; team identity travels via --team /
+    --agent-name so the spawned session wires its mailbox."""
+    del agent_type, model, mailbox_dir  # accepted for API compat; unused
+    parts = [
+        "codeyx",
+        "--work-dir", _shquote(worktree_path),
+        "--team", _shquote(team_name),
+        "--agent-name", _shquote(teammate_name),
+        "--prompt", _shquote(prompt),
     ]
-    if mailbox_dir:
-        env_parts.append(f"CODEX_MAILBOX_DIR={mailbox_dir}")
-    env_prefix = " ".join(env_parts)
-    cmd = " ".join(parts)
-    full_prompt = prompt.replace("'", "'\\''")
-    return f"{env_prefix} {cmd} '{full_prompt}'"
+    return " ".join(parts)
+
+
+def _shquote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
 
 
 def spawn_tmux_teammate(

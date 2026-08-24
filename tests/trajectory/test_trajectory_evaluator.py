@@ -11,13 +11,11 @@ import pytest
 
 from trajectory.trajectory_evaluator import (
     STANDARD_TASKS,
-    StandardTask,
     TrajectoryEvaluator,
     TrajectoryRecord,
     TrajectoryScore,
     TrajectoryStep,
 )
-
 
 # ============================================================================
 # TrajectoryScore tests
