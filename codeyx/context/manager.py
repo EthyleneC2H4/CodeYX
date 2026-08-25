@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -179,7 +180,9 @@ def cleanup_tool_results(session_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def persist_tool_result(tool_use_id: str, content: str, session_dir: Path) -> Path:
-    file_path = session_dir / f"{tool_use_id}.txt"
+    # tool_use_id comes from the model; never let it steer the filesystem.
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", tool_use_id) or "unnamed"
+    file_path = session_dir / f"{safe_id}.txt"
     try:
         fd = os.open(str(file_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -328,10 +331,15 @@ def apply_tool_result_budget(
                 ))
                 persisted_p1.add(tr.tool_use_id)
 
-        # Pass 2: aggregate
+        # Pass 2: aggregate. `aggregate_total` covers all *previous* messages;
+        # the current message's own text must be counted too or every budget
+        # check under-counts by one assistant message.
         remaining = [tr for tr in fresh if tr.tool_use_id not in persisted_p1]
-        total = aggregate_total + sum(len(c) for c in decisions.values()) + sum(
-            len(tr.content) for tr in remaining
+        total = (
+            aggregate_total
+            + len(msg.content)
+            + sum(len(c) for c in decisions.values())
+            + sum(len(tr.content) for tr in remaining)
         )
         if total >= AGGREGATE_CHAR_LIMIT:
             ranked = sorted(remaining, key=lambda tr: len(tr.content), reverse=True)
@@ -403,6 +411,22 @@ def compute_compact_threshold(context_window: int, manual: bool = False) -> int:
 
 def should_auto_compact(last_input_tokens: int, context_window: int) -> bool:
     return last_input_tokens >= compute_compact_threshold(context_window)
+
+
+def looks_like_context_overflow(err_msg: str) -> bool:
+    """Match provider context-overflow error signatures.
+
+    Rate-limit errors ("Error 429: too many requests") must NOT match —
+    the old inline condition treated any "too many" as overflow and
+    silently dropped summary input on a transient throttle. Parenthesize
+    deliberately: `and` binds tighter than `or`.
+    """
+    m = err_msg.lower()
+    if "prompt is too long" in m or "context_length_exceeded" in m:
+        return True
+    if "context length" in m or "maximum context" in m:
+        return True
+    return ("prompt" in m and "long" in m) or ("too many" in m and "token" in m)
 
 
 SUMMARY_PROMPT = """\
@@ -746,8 +770,7 @@ async def auto_compact(
             break
 
         except Exception as e:
-            err_msg = str(e).lower()
-            if "prompt" in err_msg and "long" in err_msg or "too many" in err_msg:
+            if looks_like_context_overflow(str(e)):
                 groups = _group_messages_by_turn(summary_conv.history[1:-1])
                 drop_count = max(1, len(groups) // 5)
                 remaining = groups[drop_count:]

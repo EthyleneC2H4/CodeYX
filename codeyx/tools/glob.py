@@ -5,7 +5,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from codeyx.tools.base import SKIP_DIRS, Tool, ToolResult
+from codeyx.tools.base import Tool, ToolResult
+from codeyx.tools.ignore import build_path_filter
 
 
 class Params(BaseModel):
@@ -27,10 +28,11 @@ class Glob(Tool):
             return ToolResult(output=f"Error: path not found: {params.path}", is_error=True)
 
         try:
+            include = build_path_filter(base, params.pattern)
             matches = sorted(
                 str(p.relative_to(base))
                 for p in base.glob(params.pattern)
-                if p.is_file() and not any(part in SKIP_DIRS for part in p.parts)
+                if p.is_file() and include(p)
             )
         except Exception as e:
             return ToolResult(output=f"Error: {e}", is_error=True)

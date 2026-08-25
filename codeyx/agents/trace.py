@@ -4,6 +4,10 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+# Finished subagent traces are kept for /tasks-style inspection but must be
+# bounded — a long session spawns thousands of nodes otherwise.
+MAX_FINISHED_NODES = 500
+
 
 @dataclass
 class TraceNode:
@@ -40,8 +44,18 @@ class TraceManager:
             trace_id=trace_id,
             agent_type=agent_type,
         )
+        self._prune_finished()
         self._nodes[agent_id] = node
         return node
+
+    def _prune_finished(self) -> None:
+        finished = [n for n in self._nodes.values() if n.status != "running"]
+        excess = len(finished) - MAX_FINISHED_NODES
+        if excess <= 0:
+            return
+        finished.sort(key=lambda n: n.end_time or 0.0)
+        for node in finished[:excess]:
+            self._nodes.pop(node.agent_id, None)
 
     def update(self, agent_id: str, **kwargs: int | str) -> None:
         node = self._nodes.get(agent_id)

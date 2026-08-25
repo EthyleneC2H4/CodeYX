@@ -42,7 +42,7 @@ CodeYX 是一个**从零实现、完全本地的 Agent 运行时**：ReAct 循�
 | | |
 |---|---|
 | 🌐 **多协议 LLM 支持** | Anthropic Messages、OpenAI Responses、OpenAI 兼容 Chat Completions（vLLM、Ollama 等）与 DeepSeek——统一收敛到一个 `stream()` 接口。 |
-| 🧰 **30+ 内置工具** | ReadFile / WriteFile / EditFile / Bash / Glob / Grep / Agent（子代理）/ Task* / Team* 等。 |
+| 🧰 **15 个内置工具** | ReadFile / WriteFile / EditFile / Bash / Glob / Grep / Agent（子代理）/ Team* / Enter- & ExitWorktree 等，可通过 MCP 服务器与技能扩展。 |
 | 🛡️ **五层权限模型** | Plan 模式特例 → 安全命令白名单 → 危险命令黑名单 → 路径沙箱 → 规则引擎 → 模式矩阵 → 人工确认。任何一层都可以拒绝；首个拒绝即短路。 |
 | 🗜️ **两层上下文压缩** | 先按轮次对工具结果做预算控制并落盘；接近窗口上限再触发 LLM 摘要——压缩后通过恢复快照重新挂载文件读取。预算决策跨轮冻结，保证 prompt-cache 前缀逐字节稳定。 |
 | 🧠 **跨会话记忆** | LLM 抽取器每 5 轮运行一次，把记忆分类落盘（偏好 / 反馈 / 项目知识 / 引用）；新会话自动继承。 |

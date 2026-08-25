@@ -42,7 +42,7 @@ all implemented directly on `asyncio` — no framework lock-in, every layer insp
 | | |
 |---|---|
 | 🌐 **Multi-protocol LLM support** | Anthropic Messages, OpenAI Responses, OpenAI-compatible Chat Completions (vLLM, Ollama, …), and DeepSeek — unified behind one `stream()` interface. |
-| 🧰 **30+ built-in tools** | ReadFile / WriteFile / EditFile / Bash / Glob / Grep / Agent (sub-agents) / Task* / Team* and more. |
+| 🧰 **15 built-in tools** | ReadFile / WriteFile / EditFile / Bash / Glob / Grep / Agent (sub-agents) / Team* / Enter- & ExitWorktree and more — extensible via MCP servers and skills. |
 | 🛡️ **Five-tier permission model** | Plan-mode exceptions → safe-command whitelist → dangerous-command blacklist → path sandbox → rule engine → mode matrix → human confirmation. Any tier can deny; first denial short-circuits. |
 | 🗜️ **Two-layer context compression** | Per-turn tool-result budgets with disk persistence, then LLM summarisation near the window limit — with recovery snapshots that re-attach file reads after compaction. Decisions are frozen across turns to keep prompt-cache prefixes byte-identical. |
 | 🧠 **Cross-session memory** | An LLM extractor runs every 5 turns to classify memories (preferences / feedback / project knowledge / references) to disk; new sessions inherit them automatically. |
@@ -145,7 +145,7 @@ codeyx/
 ├── client.py         # LLM abstraction (4 protocols)
 ├── conversation.py   # message model + multi-protocol serialisation
 ├── prompts.py        # priority-ordered system-prompt assembly
-├── tools/            # built-in tools (base + 20+ implementations)
+├── tools/            # built-in tools (base + 15 core implementations)
 ├── runtime/          # serial + bounded-concurrency tool scheduler
 ├── permissions/      # checker · dangerous detector · sandbox · rules
 ├── context/          # 2-layer compression + ContentReplacementState

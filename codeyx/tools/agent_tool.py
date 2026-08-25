@@ -24,7 +24,9 @@ class AgentToolParams(BaseModel):
     description: str
     subagent_type: str | None = None
     model: str | None = None
-    run_in_background: bool = False
+    # Tri-state: explicit True/False wins; None defers to agent-definition /
+    # fork defaults (forks default to background).
+    run_in_background: bool | None = None
     name: str | None = None
     isolation: str | None = None
     team_name: str | None = None
@@ -35,6 +37,19 @@ PERMISSION_MODE_MAP = {
     "acceptEdits": "ACCEPT_EDITS",
     "dontAsk": "DONT_ASK",
 }
+
+
+def _resolve_background_mode(
+    run_in_background: bool | None,
+    definition_background: bool,
+    is_fork: bool,
+) -> bool:
+    """Explicit run_in_background wins; otherwise the agent definition's
+    flag; forks default to background (they have no parent-visible
+    stream to attach to)."""
+    if run_in_background is not None:
+        return run_in_background
+    return definition_background or is_fork
 
 
 TEAMMATE_ADDENDUM = (
@@ -164,10 +179,13 @@ class AgentTool(Tool):
         # Select LLM client
         client = self._select_llm(p, definition)
 
-        # Determine background mode
-        is_background = p.run_in_background or definition.background
-        if self._enable_fork:
-            is_background = True
+        # Determine background mode. An explicit run_in_background always
+        # wins; previously enable_fork=true forced EVERY call into the
+        # background, ignoring the caller's explicit choice. Forks default
+        # to background (no parent-visible stream) when unspecified.
+        is_background = _resolve_background_mode(
+            p.run_in_background, definition.background, p.subagent_type is None
+        )
 
         # Filter tools (use full registry if coordinator mode narrowed it)
         _base_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
@@ -436,8 +454,11 @@ class AgentTool(Tool):
         # permanently undeletable.
         try:
             if backend in (BackendType.TMUX, BackendType.ITERM2):
-                return self._spawn_pane_teammate(
-                    p, team, member, backend, wt, agent_id, teammate_name
+                # tmux/osascript subprocess calls block; keep them off the
+                # event loop so streaming UI stays responsive.
+                return await asyncio.to_thread(
+                    self._spawn_pane_teammate,
+                    p, team, member, backend, wt, agent_id, teammate_name,
                 )
 
             # In-process: use task_manager only (it handles execution + notification)

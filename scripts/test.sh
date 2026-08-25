@@ -58,7 +58,8 @@ wait_response() {
 
         # CodeYX shows "✻ <PastTenseVerb> for X.Xs" when done.
         # There are 110+ random verbs so we match the ✻ ... for pattern.
-        if echo "$current" | grep -qP '✻ .+ for [0-9]'; then
+        # POSIX ERE (-E), not -P: BSD grep on macOS has no Perl mode.
+        if echo "$current" | grep -qE '✻ .+ for [0-9]'; then
             if [ "$current" = "$prev_output" ]; then
                 stable_count=$((stable_count + 1))
                 if [ $stable_count -ge 2 ]; then

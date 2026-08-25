@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -38,7 +39,9 @@ class TeamDeleteTool(Tool):
         from codeyx.teams.manager import TeamError
 
         try:
-            self._team_manager.delete_team(p.team_name)
+            # Pane kills + worktree removal run git/tmux subprocesses; offload
+            # so the event loop never blocks on them.
+            await asyncio.to_thread(self._team_manager.delete_team, p.team_name)
         except TeamError as e:
             return ToolResult(output=str(e), is_error=True)
         except Exception as e:

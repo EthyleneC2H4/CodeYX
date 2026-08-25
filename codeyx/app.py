@@ -920,7 +920,12 @@ class CodeYXApp(App):
         self._show_system_message(text)
 
     def send_user_message(self, text: str) -> None:
-        if self._streaming or self.agent is None:
+        if self.agent is None:
+            return
+        if not self._try_claim_turn():
+            # Previously a bare `return`: prompt commands (/review, skills)
+            # fired mid-stream vanished without any feedback.
+            self.add_system_message("正在生成回复，命令暂不执行：请等当前回复结束后重试。")
             return
         self._agent_task = asyncio.create_task(self._send_message(text))
 
@@ -1787,7 +1792,8 @@ class CodeYXApp(App):
                     team = self.team_manager._teams[name]
                     for m in team.members:
                         team.set_member_active(m.name, False)
-                    self.team_manager.delete_team(name)
+                    # Subprocess-heavy (tmux panes + git worktrees): offload.
+                    await asyncio.to_thread(self.team_manager.delete_team, name)
                 except Exception:
                     pass
 
@@ -1799,7 +1805,9 @@ class CodeYXApp(App):
                 try:
                     from codeyx.worktree.changes import count_worktree_changes
 
-                    changes = count_worktree_changes(wt.path, wt.head_commit)
+                    changes = await asyncio.to_thread(
+                        count_worktree_changes, wt.path, wt.head_commit
+                    )
                     if changes.uncommitted > 0 or changes.new_commits > 0:
                         log.warning(
                             "Keeping worktree '%s' (%s): %d uncommitted change(s), "

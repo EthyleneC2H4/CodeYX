@@ -1,2 +1,3 @@
+"""CodeYX — a terminal AI coding assistant."""
 
-
+__version__ = "0.2.0"

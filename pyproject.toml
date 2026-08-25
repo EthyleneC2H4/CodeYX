@@ -2,6 +2,23 @@
 name = "codeyx"
 version = "0.2.0"
 description = "A terminal AI coding assistant"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ethylene" }]
+keywords = ["ai", "cli", "coding-assistant", "agent", "terminal"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Typing :: Typed",
+]
 requires-python = ">=3.11"
 dependencies = [
     "textual>=2.1.0",

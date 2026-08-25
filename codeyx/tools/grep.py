@@ -6,7 +6,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from codeyx.tools.base import SKIP_DIRS, Tool, ToolResult
+from codeyx.tools.base import Tool, ToolResult
+from codeyx.tools.ignore import build_path_filter
 
 
 class Params(BaseModel):
@@ -38,10 +39,11 @@ class Grep(Tool):
             glob_pattern = "**/" + glob_pattern
 
         results: list[str] = []
+        include = build_path_filter(base, glob_pattern)
         for file_path in sorted(base.glob(glob_pattern)):
             if not file_path.is_file():
                 continue
-            if any(part in SKIP_DIRS for part in file_path.parts):
+            if not include(file_path):
                 continue
             try:
                 text = file_path.read_text(encoding="utf-8", errors="ignore")

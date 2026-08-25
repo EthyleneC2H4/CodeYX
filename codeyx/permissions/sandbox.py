@@ -44,8 +44,13 @@ class PathSandbox:
         p = Path(path).expanduser()
         if not p.is_absolute():
             p = self.project_root / p
-        # 先通过 normpath 消除 ".." 组件，防止路径遍历
-        abs_path = Path(os.path.normpath(str(p.absolute())))
+        try:
+            # 先通过 normpath 消除 ".." 组件，防止路径遍历
+            abs_path = Path(os.path.normpath(str(p.absolute())))
+        except ValueError:
+            # Embedded NUL and friends: no real path can match, deny instead
+            # of letting ValueError crash the turn.
+            return False, f"非法路径: {path!r}"
 
         if has_traversal:
             # Traversal segments may only resolve strictly inside the project
@@ -60,6 +65,8 @@ class PathSandbox:
 
         try:
             real_path = abs_path.resolve(strict=True)
+        except ValueError:
+            return False, f"非法路径: {path!r}"
         except OSError:
             # Path (or part of its parent chain) doesn't exist yet — a write
             # to a new directory, e.g. the plan file. Resolve the deepest

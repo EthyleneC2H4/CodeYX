@@ -575,9 +575,12 @@ class Agent:
                     continue
                 elif runtime_state.can_retry_output_tokens(MAX_OUTPUT_TOKENS_RECOVERIES):
                     recovery_count = runtime_state.record_output_token_retry()
-                    conversation.add_assistant_message(
-                        response.text, thinking_blocks=conv_thinking
-                    )
+                    if response.text or conv_thinking:
+                        # Truncated output can be empty text; an empty
+                        # assistant message makes the next API call 400.
+                        conversation.add_assistant_message(
+                            response.text, thinking_blocks=conv_thinking
+                        )
                     conversation.add_user_message(
                         "Output token limit hit. Resume directly from where you stopped. "
                         "Break remaining work into smaller pieces."
@@ -615,7 +618,17 @@ class Agent:
                 break
 
             malformed_tool_calls = [tc for tc in response.tool_calls if not tc.tool_id]
+            valid_tool_calls = [tc for tc in response.tool_calls if tc.tool_id]
             if malformed_tool_calls:
+                # Surface synthetic errors but keep going where possible:
+                # aborting the whole run here silently discarded any VALID
+                # sibling calls in the same response.
+                log.warning(
+                    "Dropping %d malformed tool call(s) without id",
+                    len(malformed_tool_calls),
+                )
+
+            if not valid_tool_calls:
                 conversation.add_assistant_message(
                     response.text, thinking_blocks=conv_thinking
                 )
@@ -639,18 +652,33 @@ class Agent:
                     tool_name=tc.tool_name,
                     arguments=tc.arguments,
                 )
-                for tc in response.tool_calls
+                for tc in valid_tool_calls
             ]
             conversation.add_assistant_message(
                 response.text, tool_uses, thinking_blocks=conv_thinking
             )
 
+            # Malformed calls are never executed and never enter history —
+            # there is no tool_use block for a result to match. The events
+            # below exist purely so the UI can show what was dropped.
+            for tc in malformed_tool_calls:
+                synthetic = ToolResultRecovery.synthetic_result(
+                    f"Malformed tool call: missing tool_use id for {tc.tool_name}"
+                )
+                yield ToolResultEvent(
+                    tool_id=tc.tool_id,
+                    tool_name=tc.tool_name,
+                    output=synthetic.output,
+                    is_error=True,
+                    elapsed=0.0,
+                )
+
             tool_results: list[ToolResultBlock] = []
             # set once the results message is durably in history
             appended = False
-            runtime_state.pending_tool_calls = list(response.tool_calls)
+            runtime_state.pending_tool_calls = list(valid_tool_calls)
             try:
-                batches = scheduler.partition(response.tool_calls)
+                batches = scheduler.partition(valid_tool_calls)
 
                 for batch in batches:
                     if batch.concurrent and len(batch.calls) > 1:

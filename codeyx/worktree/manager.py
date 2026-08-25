@@ -56,6 +56,12 @@ class WorktreeManager:
             env=env,
         )
 
+    async def _run_git_async(
+        self, args: list[str], cwd: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        # git can block up to the 60s timeout; never run it on the event loop.
+        return await asyncio.to_thread(self._run_git, args, cwd)
+
     # ------------------------------------------------------------------
     # Fast recovery: read HEAD SHA from filesystem without git subprocess
     # ------------------------------------------------------------------
@@ -138,7 +144,7 @@ class WorktreeManager:
 
             os.makedirs(self.worktree_dir, exist_ok=True)
 
-            result = self._run_git([
+            result = await self._run_git_async([
                 "worktree", "add",
                 "-B", branch_name, wt_path, base_branch,
             ])
@@ -147,7 +153,9 @@ class WorktreeManager:
                     f"git worktree add failed: {result.stderr.strip()}"
                 )
 
-            perform_post_creation_setup(
+            # Post-creation setup shells out to git; keep it off the loop.
+            await asyncio.to_thread(
+                perform_post_creation_setup,
                 self.repo_root,
                 wt_path,
                 symlink_directories=self.symlink_directories,
@@ -174,8 +182,8 @@ class WorktreeManager:
             raise WorktreeError(f"worktree not found: {name}")
 
         original_cwd = os.getcwd()
-        original_branch = self._get_current_branch()
-        original_head = self._get_head_commit()
+        original_branch = await asyncio.to_thread(self._get_current_branch)
+        original_head = await asyncio.to_thread(self._get_head_commit)
 
         session = WorktreeSession(
             original_cwd=original_cwd,
@@ -206,7 +214,9 @@ class WorktreeManager:
             raise WorktreeError(f"worktree not found: {name}")
 
         if action == "remove" and not discard_changes:
-            changes = count_worktree_changes(wt.path, wt.head_commit)
+            changes = await asyncio.to_thread(
+                count_worktree_changes, wt.path, wt.head_commit
+            )
             if changes.uncommitted > 0 or changes.new_commits > 0:
                 raise WorktreeError(
                     f"worktree has changes ({changes.uncommitted} uncommitted, "
@@ -225,7 +235,7 @@ class WorktreeManager:
     # ------------------------------------------------------------------
 
     async def _remove_worktree(self, name: str, wt: Worktree) -> None:
-        result = self._run_git(["worktree", "remove", "--force", wt.path])
+        result = await self._run_git_async(["worktree", "remove", "--force", wt.path])
         if result.returncode != 0:
             log.warning("git worktree remove failed: %s", result.stderr.strip())
 
@@ -233,7 +243,7 @@ class WorktreeManager:
 
         flat_slug = flatten_slug(name)
         branch_name = f"worktree-{flat_slug}"
-        self._run_git(["branch", "-D", branch_name])
+        await self._run_git_async(["branch", "-D", branch_name])
 
         self.active.pop(name, None)
 
@@ -248,11 +258,11 @@ class WorktreeManager:
             return
 
         path = os.path.join(self.worktree_dir, flatten_slug(name))
-        result = self._run_git(["worktree", "remove", "--force", path])
+        result = await self._run_git_async(["worktree", "remove", "--force", path])
         if result.returncode != 0:
             log.warning("git worktree remove failed: %s", result.stderr.strip())
         await asyncio.sleep(0.1)
-        self._run_git(["branch", "-D", f"worktree-{flatten_slug(name)}"])
+        await self._run_git_async(["branch", "-D", f"worktree-{flatten_slug(name)}"])
 
     # ------------------------------------------------------------------
     # Auto cleanup
@@ -264,7 +274,7 @@ class WorktreeManager:
         if wt is None:
             return CleanupResult(kept=False)
 
-        if has_worktree_changes(wt.path, head_commit):
+        if await asyncio.to_thread(has_worktree_changes, wt.path, head_commit):
             return CleanupResult(kept=True, path=wt.path, branch=wt.branch)
 
         await self._remove_worktree(name, wt)

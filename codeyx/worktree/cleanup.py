@@ -57,10 +57,10 @@ async def cleanup_stale_worktrees(manager: WorktreeManager, cutoff_hours: int) -
         if head_sha is None:
             continue
 
-        if has_worktree_changes(str(entry), head_sha):
+        if await asyncio.to_thread(has_worktree_changes, str(entry), head_sha):
             continue
 
-        if has_unpushed_commits(str(entry)):
+        if await asyncio.to_thread(has_unpushed_commits, str(entry)):
             continue
 
         try:

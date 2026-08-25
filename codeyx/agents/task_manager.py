@@ -13,6 +13,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Terminal tasks stop being listed after this long; each retained entry pins
+# a full Agent (conversation history + client), so retention must be finite.
+TERMINAL_TASK_RETENTION_SECONDS = 600.0
+MAX_TERMINAL_TASKS = 50
+_TERMINAL_STATES = {"completed", "failed", "cancelled"}
+
 
 @dataclass
 class ProgressInfo:
@@ -52,6 +58,7 @@ class TaskManager:
         name: str = "",
         fork_conversation: Any = None,
     ) -> str:
+        self.reap()
         task_id = uuid.uuid4().hex[:8]
         bg = BackgroundTask(
             id=task_id,
@@ -161,6 +168,7 @@ class TaskManager:
         return False
 
     def poll_completed(self) -> list[BackgroundTask]:
+        self.reap()
         completed: list[BackgroundTask] = []
         while not self._notify_queue.empty():
             try:
@@ -171,3 +179,32 @@ class TaskManager:
             except asyncio.QueueEmpty:
                 break
         return completed
+
+    def reap(self, now: float | None = None) -> int:
+        """Drop terminal tasks past their retention window, then enforce a
+        hard cap. Running tasks are never touched. Returns removed count."""
+        now = time.monotonic() if now is None else now
+        expired = [
+            tid
+            for tid, bg in self._tasks.items()
+            if bg.status in _TERMINAL_STATES
+            and bg.end_time is not None
+            and now - bg.end_time >= TERMINAL_TASK_RETENTION_SECONDS
+        ]
+        for tid in expired:
+            del self._tasks[tid]
+
+        terminal = [
+            tid for tid, bg in self._tasks.items() if bg.status in _TERMINAL_STATES
+        ]
+        excess = len(terminal) - MAX_TERMINAL_TASKS
+        if excess > 0:
+            # Oldest finished first (end_time is monotonic).
+            terminal.sort(key=lambda tid: self._tasks[tid].end_time or 0.0)
+            for tid in terminal[:excess]:
+                del self._tasks[tid]
+
+        removed = len(expired) + max(excess, 0)
+        if removed:
+            log.debug("Reaped %d terminal background tasks", removed)
+        return removed

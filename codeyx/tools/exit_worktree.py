@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -72,8 +73,11 @@ class ExitWorktreeTool(Tool):
         discard = params.discard_changes or False
 
         if action == "remove" and not discard:
-            changes = count_worktree_changes(
-                session.worktree_path, session.original_head_commit
+            # git diff/status subprocesses — keep off the event loop.
+            changes = await asyncio.to_thread(
+                count_worktree_changes,
+                session.worktree_path,
+                session.original_head_commit,
             )
             if changes.uncommitted > 0 or changes.new_commits > 0:
                 parts = []

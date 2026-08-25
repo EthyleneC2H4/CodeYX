@@ -692,7 +692,7 @@ class TestAgentToolParams:
         params = AgentToolParams(prompt="do this", description="test")
         assert params.prompt == "do this"
         assert params.subagent_type is None
-        assert params.run_in_background is False
+        assert params.run_in_background is None  # tri-state: unset, not False
 
     def test_optional_fields(self):
         from codeyx.tools.agent_tool import AgentToolParams
