@@ -41,21 +41,10 @@ jobs:
       - name: Compile Python sources
         run: uv run python -m compileall -q codeyx tests
 
-      - name: Critical Ruff checks
-        run: uv run ruff check codeyx tests --select E9,F63,F7 --output-format=github
-
-      - name: Full Ruff report (advisory)
-        run: |
-          mkdir -p reports
-          uv run ruff check codeyx tests --output-format=concise > reports/ruff-report.txt || true
-
-      - name: Upload Ruff report
-        uses: actions/upload-artifact@v5
-        if: always()
-        with:
-          name: ruff-report
-          path: reports/ruff-report.txt
-          if-no-files-found: ignore
+      # Full ruff gate (E/F/I/N/W/UP, E501 advisory-only per pyproject).
+      # The codebase is clean under this config; CI enforces it.
+      - name: Ruff lint
+        run: uv run ruff check codeyx tests --output-format=github
 
   unit:
     name: Unit Test Suite (${{ matrix.python-version }})
