@@ -31,6 +31,13 @@ class PathSandbox:
         return list(self._allowed_roots)
 
 
+    def rebase(self, project_root: str) -> None:
+        """Re-point the primary allowed root. Used by EnterWorktree /
+        ExitWorktree so relative-path resolution follows the session's
+        actual working root instead of the launch directory."""
+        self._allowed_roots[0] = Path(project_root).resolve()
+
+
     def check(self, path: str) -> tuple[bool, str]:
         has_traversal = ".." in Path(path).parts
 

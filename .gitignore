@@ -11,3 +11,6 @@ build/
 .codeyx/
 .claude/
 CLAUDE.md
+.coverage
+.coverage.*
+reports/

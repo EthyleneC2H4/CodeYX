@@ -2,6 +2,7 @@
 """Tests for the five-layer permission system."""
 from __future__ import annotations
 
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -503,6 +504,8 @@ async def test_e2e_sandbox_blocks_outside_path():
 async def test_e2e_rule_allows_git():
     """A rule allowing git commands lets them pass without HITL."""
     tmpdir = Path(tempfile.mkdtemp())
+    # Bash executes against the sandbox root, so make it a real repo.
+    subprocess.run(["git", "init", "-q", str(tmpdir)], check=True)
     rules_file = tmpdir / ".codeyx" / "permissions.yaml"
     rules_file.parent.mkdir(parents=True)
     rules_file.write_text(yaml.dump([{"rule": "Bash(git *)", "effect": "allow"}]))

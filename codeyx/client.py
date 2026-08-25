@@ -96,6 +96,17 @@ def _mark_last_tool_for_cache(tools: list[dict[str, Any]]) -> list[dict[str, Any
     return marked
 
 
+def _anthropic_effective_input(usage) -> int:
+    """Total prompt size including cached prefixes. ``usage.input_tokens``
+    alone collapses to just the uncached tail once prompt caching engages,
+    which would make the auto-compact gate never fire."""
+    return (
+        getattr(usage, "input_tokens", 0)
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    )
+
+
 class LLMError(Exception):
     pass
 
@@ -264,7 +275,7 @@ class AnthropicClient(LLMClient):
                 final = await stream.get_final_message()
                 yield StreamEnd(
                     stop_reason=final.stop_reason or "end_turn",
-                    input_tokens=final.usage.input_tokens,
+                    input_tokens=_anthropic_effective_input(final.usage),
                     output_tokens=final.usage.output_tokens,
                 )
 
@@ -311,6 +322,8 @@ class OpenAIClient(LLMClient):
             "model": self.model,
             "input": input_messages,
             "stream": True,
+            # Without this the set_max_output_tokens escalation is a no-op.
+            "max_output_tokens": self.max_output_tokens,
         }
         if system:
             kwargs["instructions"] = system
@@ -320,6 +333,7 @@ class OpenAIClient(LLMClient):
         current_tool_name = ""
         current_call_id = ""
         json_accum = ""
+        responses_ended = False
 
         try:
             response_stream = await self._client.responses.create(**kwargs)
@@ -366,11 +380,24 @@ class OpenAIClient(LLMClient):
                 elif event.type == "response.completed":
                     resp = getattr(event, "response", None)
                     usage = getattr(resp, "usage", None) if resp else None
+                    # status=="incomplete" means output was truncated; map
+                    # the reason so the agent's max_tokens recovery fires.
+                    stop = "end_turn"
+                    if getattr(resp, "status", "") == "incomplete":
+                        details = getattr(resp, "incomplete_details", None)
+                        reason = getattr(details, "reason", "") if details else ""
+                        stop = "max_tokens" if reason == "max_output_tokens" else "incomplete"
                     yield StreamEnd(
-                        stop_reason="end_turn",
+                        stop_reason=stop,
                         input_tokens=getattr(usage, "input_tokens", 0) or 0,
                         output_tokens=getattr(usage, "output_tokens", 0) or 0,
                     )
+                    responses_ended = True
+
+            if not responses_ended:
+                # Stream closed without a terminal event: synthesize one so
+                # token accounting and stop-reason handling stay coherent.
+                yield StreamEnd(stop_reason="end_turn")
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -440,18 +467,21 @@ class OpenAICompatClient(LLMClient):
         # stream delivers tool-call deltas indexed by position within the
         # ``tool_calls`` list.  We track each in-flight call by its index.
         active_calls: dict[int, dict[str, str]] = {}  # idx -> {id, name, args}
+        final_stop = "end_turn"
+        stream_ended = False
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
             async for chunk in response:
                 if not chunk.choices:
                     # Final chunk with only usage data.
-                    if chunk.usage:
+                    if chunk.usage and not stream_ended:
                         yield StreamEnd(
-                            stop_reason="end_turn",
+                            stop_reason=final_stop,
                             input_tokens=chunk.usage.prompt_tokens or 0,
                             output_tokens=chunk.usage.completion_tokens or 0,
                         )
+                        stream_ended = True
                     continue
 
                 choice = chunk.choices[0]
@@ -482,8 +512,15 @@ class OpenAICompatClient(LLMClient):
                             yield ToolCallDelta(text=tc.function.arguments)
 
                 # --- finish reasons ---
-                if choice.finish_reason in ("tool_calls", "stop"):
-                    if choice.finish_reason == "tool_calls":
+                if choice.finish_reason in ("tool_calls", "stop", "length"):
+                    if choice.finish_reason == "length":
+                        # Truncated output: surface it so the agent's
+                        # max_tokens recovery can escalate instead of the
+                        # truncation passing silently.
+                        final_stop = "max_tokens"
+                    if choice.finish_reason in ("tool_calls", "length"):
+                        # Flush accumulated calls on length too — dropping
+                        # them silently loses partial tool_use entirely.
                         for _idx, call in sorted(active_calls.items()):
                             try:
                                 args = json.loads(call["args"]) if call["args"] else {}
@@ -495,6 +532,12 @@ class OpenAICompatClient(LLMClient):
                                 arguments=args,
                             )
                         active_calls.clear()
+
+            if not stream_ended:
+                # Provider never sent a usage-only terminal chunk (ignores
+                # stream_options or folds usage elsewhere): synthesize one,
+                # else token accounting stays 0 and auto-compact never runs.
+                yield StreamEnd(stop_reason=final_stop)
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -574,17 +617,20 @@ class DeepSeekClient(LLMClient):
         active_calls: dict[int, dict[str, str]] = {}
         reasoning_accum = ""
         in_reasoning = False
+        final_stop = "end_turn"
+        stream_ended = False
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
             async for chunk in response:
                 if not chunk.choices:
-                    if chunk.usage:
+                    if chunk.usage and not stream_ended:
                         yield StreamEnd(
-                            stop_reason="end_turn",
+                            stop_reason=final_stop,
                             input_tokens=chunk.usage.prompt_tokens or 0,
                             output_tokens=chunk.usage.completion_tokens or 0,
                         )
+                        stream_ended = True
                     continue
 
                 choice = chunk.choices[0]
@@ -630,7 +676,7 @@ class DeepSeekClient(LLMClient):
                             yield ToolCallDelta(text=tc.function.arguments)
 
                 # --- finish reasons ---
-                if choice.finish_reason in ("tool_calls", "stop"):
+                if choice.finish_reason in ("tool_calls", "stop", "length"):
                     if in_reasoning:
                         yield ThinkingComplete(
                             thinking=reasoning_accum,
@@ -638,7 +684,9 @@ class DeepSeekClient(LLMClient):
                         )
                         in_reasoning = False
                         reasoning_accum = ""
-                    if choice.finish_reason == "tool_calls":
+                    if choice.finish_reason == "length":
+                        final_stop = "max_tokens"
+                    if choice.finish_reason in ("tool_calls", "length"):
                         for _idx, call in sorted(active_calls.items()):
                             try:
                                 args = json.loads(call["args"]) if call["args"] else {}
@@ -650,6 +698,9 @@ class DeepSeekClient(LLMClient):
                                 arguments=args,
                             )
                         active_calls.clear()
+
+            if not stream_ended:
+                yield StreamEnd(stop_reason=final_stop)
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"DeepSeek authentication failed: {e}") from e

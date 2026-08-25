@@ -31,12 +31,13 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 # Strictly read-only commands. Anything that can write, delete, or execute
-# (find -delete/-exec, xargs, sed -i, awk system(), tee, npx, …) must NOT be
-# listed here — those fall through to the mode matrix / user confirmation.
+# (find -delete/-exec, xargs, sed -i, awk system(), tee, npx, env <cmd>, …)
+# must NOT be listed here — those fall through to the mode matrix / user
+# confirmation. `env` was removed: prefix matching let "env rm -rf /" hit it.
 _SAFE_COMMANDS = frozenset({
     "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc",
     "which", "whereis", "whoami", "hostname", "uname",
-    "date", "cal", "uptime", "df", "du", "free", "env", "printenv",
+    "date", "cal", "uptime", "df", "du", "free", "printenv",
     "file", "stat", "readlink", "realpath", "basename", "dirname",
     "sort", "uniq", "tr", "cut", "grep", "egrep", "fgrep",
     "diff", "comm", "true", "false", "test",
@@ -75,14 +76,16 @@ def _extract_wrapped_payload(command: str) -> str | None:
     return None
 
 
-_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||\r?\n")
 
 
 def _detect_rm_variants(command: str) -> str:
     """Token-level detection of recursive deletion aimed at the filesystem
     root. Flags may appear in any order, combined or separate, short or
     long ("rm -rf /", "rm --force --recursive /", "rm -r -f /*", …).
-    Chained commands are checked segment-by-segment."""
+    Chained commands are checked segment-by-segment; newlines count as
+    separators too (detect() must call this on RAW text — normalization
+    collapses newlines and would fuse chained segments together)."""
     for segment in _SEGMENT_SPLIT_RE.split(command):
         reason = _detect_rm_segment(segment.strip())
         if reason:
@@ -145,7 +148,9 @@ def is_safe_command(command: str) -> bool:
     trimmed = _normalize_command(command)
     if not trimmed:
         return False
-    for ch in ("|", ";", "&&", ">", "$(", "`"):
+    # "<(" / "=(" are bash/zsh process substitution: the inner command runs
+    # at full privilege, so "cat <(rm -rf /)" must not prefix-match "cat".
+    for ch in ("|", ";", "&&", ">", "$(", "`", "<(", "=("):
         if ch in trimmed:
             return False
     for safe in _SAFE_COMMANDS:
@@ -165,10 +170,12 @@ class DangerousCommandDetector:
 
 
     def detect(self, command: str) -> tuple[bool, str]:
-        command = _normalize_command(command)
+        # Segment-split on the RAW text first: _normalize_command turns \n
+        # into spaces, fusing "echo hi\nrm -rf /" past the splitter.
         rm_reason = _detect_rm_variants(command)
         if rm_reason:
             return True, rm_reason
+        command = _normalize_command(command)
         for pattern, reason in self._patterns:
             if pattern.search(command):
                 return True, reason

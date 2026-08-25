@@ -13,6 +13,13 @@ MAX_TIMEOUT = 600
 class Params(BaseModel):
     command: str = Field(description="Shell command to execute")
     timeout: int = Field(default=120, description="Timeout in seconds (max 600)")
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "Optional working directory for the command. The agent runtime "
+            "normally fills this with the session's sandbox root."
+        ),
+    )
 
 
 class Bash(Tool):
@@ -30,6 +37,7 @@ class Bash(Tool):
                 params.command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=params.cwd,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:

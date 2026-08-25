@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -9,7 +10,7 @@ from codeyx.tools.base import Tool, ToolResult
 from codeyx.worktree.changes import count_worktree_changes
 
 if TYPE_CHECKING:
-    from codeyx.worktree.manager import WorktreeManager
+    from codeyx.worktree.manager import WorktreeManager, WorktreeSession
 
 
 class ExitWorktreeParams(BaseModel):
@@ -37,8 +38,15 @@ class ExitWorktreeTool(Tool):
     should_defer = True
 
 
-    def __init__(self, worktree_manager: WorktreeManager) -> None:
+    def __init__(
+        self,
+        worktree_manager: WorktreeManager,
+        on_exit: Callable[[WorktreeSession], Awaitable[None]] | None = None,
+    ) -> None:
         self._manager = worktree_manager
+        # Host callback restoring the session's original root (chdir back,
+        # agent.work_dir, sandbox root) — the mirror of EnterWorktree's.
+        self._on_exit = on_exit
 
 
     async def execute(self, params: ExitWorktreeParams) -> ToolResult:
@@ -97,17 +105,28 @@ class ExitWorktreeTool(Tool):
                 output=f"Error exiting worktree: {e}", is_error=True
             )
 
+        restore_error = ""
+        if self._on_exit is not None:
+            try:
+                await self._on_exit(session)
+            except Exception as e:
+                restore_error = (
+                    f" WARNING: the session could not be switched back to "
+                    f"{original_cwd} ({e})."
+                )
+
         if action == "keep":
             return ToolResult(
                 output=(
                     f"Exited worktree. Your work is preserved at {worktree_path}. "
-                    f"Session is now back in {original_cwd}."
+                    f"Session is now back in {original_cwd}.{restore_error}"
                 )
             )
 
         return ToolResult(
             output=(
                 f"Exited and removed worktree at {worktree_path}. "
-                f"Session is now back in {original_cwd}."
-            )
+                f"Session is now back in {original_cwd}.{restore_error}"
+            ),
+            is_error=bool(restore_error),
         )

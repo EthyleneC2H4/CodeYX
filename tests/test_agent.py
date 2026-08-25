@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from codeyx.agent import (
     Agent,
@@ -27,7 +28,9 @@ from codeyx.tools.base import (
     StreamEnd,
     StreamEvent,
     TextDelta,
+    Tool,
     ToolCallComplete,
+    ToolResult,
 )
 
 # ---------------------------------------------------------------------------
@@ -291,6 +294,144 @@ async def test_stop_cancel():
     c = _collect(events)
     assert len(c["turn"]) >= 1
     assert len(c["turn"]) < 50
+
+
+# ---------------------------------------------------------------------------
+# Cancellation history repair (2026-08 audit regression)
+# ---------------------------------------------------------------------------
+
+class _HangParams(BaseModel):
+    pass
+
+
+class HangingTool(Tool):
+    """A tool whose execution never finishes: cancellation lands inside it."""
+
+    name = "Hang"
+    description = "sleeps forever; used to park cancellation mid-tool"
+    params_model = _HangParams
+    category = "read"
+
+    async def execute(self, params: BaseModel) -> Any:
+        await asyncio.sleep(3600)
+        return ToolResult(output="done")
+
+
+def _make_cancel_agent(tools: list[Tool]) -> Agent:
+    client = MockLLMClient([[
+        TextDelta("Working."),
+        *[ToolCallComplete(tid, "Hang", {}) for tid in tools],
+        StreamEnd("end_turn", input_tokens=10, output_tokens=10),
+    ]])
+    registry = create_default_registry()
+    for _ in tools:
+        registry.register(HangingTool())
+    return Agent(client, registry, "anthropic")
+
+
+async def _cancel_once_in_tool_window(agen, require_use: bool = True):
+    """Consume events until the generator goes quiet because it is suspended
+    INSIDE tool execution; the poll timeout then delivers CancelledError into
+    that exact await point, so the repair path runs before this returns."""
+    saw_use = False
+    while True:
+        try:
+            ev = await asyncio.wait_for(agen.__anext__(), timeout=0.5)
+        except TimeoutError:
+            if require_use and not saw_use:
+                pytest.fail("cancellation landed before the tool window opened")
+            return
+        if isinstance(ev, ToolUseEvent):
+            saw_use = True
+        elif isinstance(ev, ToolResultEvent):
+            pytest.fail("tool completed before cancellation could land")
+
+
+@pytest.mark.asyncio
+async def test_cancel_mid_tool_backfills_results():
+    """Cancelling inside the tool-execution window must backfill a synthetic
+    tool_result for the stranded tool_use — otherwise every later request
+    fails API validation ("tool_use ids without tool_result blocks")."""
+    agent = _make_cancel_agent(["t1"])
+    conv = ConversationManager()
+    conv.add_user_message("go")
+
+    agen = agent.run(conv)
+    try:
+        await _cancel_once_in_tool_window(agen)
+    finally:
+        await agen.aclose()
+
+    last = conv.history[-1]
+    assert last.tool_results, "no tool_results appended after mid-tool cancel"
+    assert any(
+        r.tool_use_id == "t1" and r.is_error for r in last.tool_results
+    ), f"tool_use t1 left dangling: {last.tool_results}"
+
+
+@pytest.mark.asyncio
+async def test_cancel_preserves_collected_and_backfills_rest():
+    """Partial progress survives cancellation: real results already collected
+    are kept verbatim; only the still-pending calls get synthetic errors."""
+    client = MockLLMClient([[
+        TextDelta("Working."),
+        ToolCallComplete("fast", "ReadFile", {"file_path": "README.md"}),
+        ToolCallComplete("slow", "Hang", {}),
+        StreamEnd("end_turn", input_tokens=10, output_tokens=10),
+    ]])
+    registry = create_default_registry()
+    registry.register(HangingTool())
+    agent = Agent(client, registry, "anthropic")
+    conv = ConversationManager()
+    conv.add_user_message("go")
+
+    agen = agent.run(conv)
+    try:
+        saw_fast_result = False
+        while True:
+            ev = await asyncio.wait_for(agen.__anext__(), timeout=2.0)
+            if isinstance(ev, ToolResultEvent) and ev.tool_id == "fast":
+                saw_fast_result = True
+                break
+        assert saw_fast_result
+        await _cancel_once_in_tool_window(agen, require_use=False)
+    finally:
+        await agen.aclose()
+
+    last = conv.history[-1]
+    by_id = {r.tool_use_id: r for r in last.tool_results}
+    assert set(by_id) == {"fast", "slow"}, f"missing results: {by_id}"
+    assert not by_id["fast"].is_error, "collected result was clobbered"
+    assert by_id["slow"].is_error, "pending call got no synthetic result"
+
+
+@pytest.mark.asyncio
+async def test_normal_completion_appends_results_once():
+    """Guard against double-append: a clean run adds exactly one results
+    message even though the repair path now exists."""
+    client = MockLLMClient([
+        [
+            TextDelta("Reading."),
+            ToolCallComplete("t1", "ReadFile", {"file_path": "README.md"}),
+            StreamEnd("end_turn", input_tokens=10, output_tokens=10),
+        ],
+        [
+            TextDelta("Done."),
+            StreamEnd("end_turn", input_tokens=5, output_tokens=5),
+        ],
+    ])
+    agent = Agent(client, create_default_registry(), "anthropic")
+    conv = ConversationManager()
+    conv.add_user_message("read")
+
+    events = []
+    async for e in agent.run(conv):
+        events.append(e)
+
+    results_msgs = [m for m in conv.history if m.tool_results]
+    assert len(results_msgs) == 1
+    c = _collect(events)
+    assert len(c["loop"]) == 1
 
 @pytest.mark.asyncio
 async def test_stop_consecutive_unknown_tools():

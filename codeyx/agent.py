@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import os
 import random
 import time
 import uuid
@@ -642,47 +643,86 @@ class Agent:
             )
 
             tool_results: list[ToolResultBlock] = []
+            # set once the results message is durably in history
+            appended = False
             runtime_state.pending_tool_calls = list(response.tool_calls)
-            batches = scheduler.partition(response.tool_calls)
+            try:
+                batches = scheduler.partition(response.tool_calls)
 
-            for batch in batches:
-                if batch.concurrent and len(batch.calls) > 1:
-                    batch_results = await scheduler.run_parallel(
-                        batch.calls,
-                        self._execute_single_tool_direct,
-                    )
-                    for br in batch_results:
-                        runtime_state.record_tool_result(br.is_unknown)
-                        for he in self._drain_hook_events():
-                            yield he
-                        content = self._maybe_persist_or_truncate(
-                            br.tool_id, br.result
+                for batch in batches:
+                    if batch.concurrent and len(batch.calls) > 1:
+                        batch_results = await scheduler.run_parallel(
+                            batch.calls,
+                            self._execute_single_tool_direct,
                         )
-                        tool_results.append(
-                            ToolResultBlock(
-                                tool_use_id=br.tool_id,
-                                content=content,
-                                is_error=br.result.is_error,
+                        for br in batch_results:
+                            runtime_state.record_tool_result(br.is_unknown)
+                            for he in self._drain_hook_events():
+                                yield he
+                            content = self._maybe_persist_or_truncate(
+                                br.tool_id, br.result
                             )
-                        )
-                        yield ToolResultEvent(
-                            tool_id=br.tool_id,
-                            tool_name=br.tool_name,
-                            output=br.result.output,
-                            is_error=br.result.is_error,
-                            elapsed=br.elapsed,
-                        )
-                else:
-                    for tc in batch.calls:
-                        result: ToolResult | None = None
-                        elapsed = 0.0
-                        is_unknown = False
+                            tool_results.append(
+                                ToolResultBlock(
+                                    tool_use_id=br.tool_id,
+                                    content=content,
+                                    is_error=br.result.is_error,
+                                )
+                            )
+                            yield ToolResultEvent(
+                                tool_id=br.tool_id,
+                                tool_name=br.tool_name,
+                                output=br.result.output,
+                                is_error=br.result.is_error,
+                                elapsed=br.elapsed,
+                            )
+                    else:
+                        for tc in batch.calls:
+                            result: ToolResult | None = None
+                            elapsed = 0.0
+                            is_unknown = False
 
-                        rejected = await self._run_pre_tool_hooks(tc)
-                        for he in self._drain_hook_events():
-                            yield he
-                        if rejected is not None:
-                            result = rejected
+                            rejected = await self._run_pre_tool_hooks(tc)
+                            for he in self._drain_hook_events():
+                                yield he
+                            if rejected is not None:
+                                result = rejected
+                                content = self._maybe_persist_or_truncate(
+                                    tc.tool_id, result
+                                )
+                                tool_results.append(
+                                    ToolResultBlock(
+                                        tool_use_id=tc.tool_id,
+                                        content=content,
+                                        is_error=True,
+                                    )
+                                )
+                                yield ToolResultEvent(
+                                    tool_id=tc.tool_id,
+                                    tool_name=tc.tool_name,
+                                    output=result.output,
+                                    is_error=True,
+                                    elapsed=0.0,
+                                )
+                                continue
+
+                            async for item in self._execute_tool(tc):
+                                if isinstance(item, PermissionRequest):
+                                    yield item
+                                else:
+                                    result, elapsed, is_unknown = item
+
+                            if result is None:
+                                result = ToolResultRecovery.synthetic_result(
+                                    "Error: no result from tool"
+                                )
+
+                            runtime_state.record_tool_result(is_unknown)
+
+                            await self._notify_post_tool_hooks(tc)
+                            for he in self._drain_hook_events():
+                                yield he
+
                             content = self._maybe_persist_or_truncate(
                                 tc.tool_id, result
                             )
@@ -690,69 +730,66 @@ class Agent:
                                 ToolResultBlock(
                                     tool_use_id=tc.tool_id,
                                     content=content,
-                                    is_error=True,
+                                    is_error=result.is_error,
                                 )
                             )
                             yield ToolResultEvent(
                                 tool_id=tc.tool_id,
                                 tool_name=tc.tool_name,
                                 output=result.output,
-                                is_error=True,
-                                elapsed=0.0,
-                            )
-                            continue
-
-                        async for item in self._execute_tool(tc):
-                            if isinstance(item, PermissionRequest):
-                                yield item
-                            else:
-                                result, elapsed, is_unknown = item
-
-                        if result is None:
-                            result = ToolResultRecovery.synthetic_result(
-                                "Error: no result from tool"
-                            )
-
-                        runtime_state.record_tool_result(is_unknown)
-
-                        await self._notify_post_tool_hooks(tc)
-                        for he in self._drain_hook_events():
-                            yield he
-
-                        content = self._maybe_persist_or_truncate(
-                            tc.tool_id, result
-                        )
-                        tool_results.append(
-                            ToolResultBlock(
-                                tool_use_id=tc.tool_id,
-                                content=content,
                                 is_error=result.is_error,
+                                elapsed=elapsed,
                             )
-                        )
-                        yield ToolResultEvent(
-                            tool_id=tc.tool_id,
-                            tool_name=tc.tool_name,
-                            output=result.output,
-                            is_error=result.is_error,
-                            elapsed=elapsed,
-                        )
 
-            runtime_state.pending_tool_calls = []
+                runtime_state.pending_tool_calls = []
 
-            if runtime_state.consecutive_unknown_tools >= 3:
-                yield ErrorEvent(
-                    message="Agent terminated: too many consecutive unknown tool calls"
-                )
-                break
+                if runtime_state.consecutive_unknown_tools >= 3:
+                    yield ErrorEvent(
+                        message="Agent terminated: too many consecutive unknown tool calls"
+                    )
+                    break
 
-            conversation.add_tool_results_message(tool_results)
-            if self.hook_engine:
-                ctx = self._build_hook_context("turn_end")
-                await self.hook_engine.run_hooks("turn_end", ctx)
-                for he in self._drain_hook_events():
-                    yield he
-            yield TurnComplete(turn=iteration)
+                conversation.add_tool_results_message(tool_results)
+                appended = True
+                if self.hook_engine:
+                    ctx = self._build_hook_context("turn_end")
+                    await self.hook_engine.run_hooks("turn_end", ctx)
+                    for he in self._drain_hook_events():
+                        yield he
+                yield TurnComplete(turn=iteration)
+            except BaseException:
+                # Cancellation landed mid-tool-batch: answer every assistant
+                # tool_use with a synthetic tool_result, or the next request
+                # fails API validation until /clear.
+                if not appended:
+                    self._backfill_interrupted_tool_results(
+                        conversation, runtime_state.pending_tool_calls, tool_results
+                    )
+                raise
 
+    @staticmethod
+    def _backfill_interrupted_tool_results(
+        conversation: ConversationManager,
+        pending_calls: list,
+        collected: list[ToolResultBlock],
+    ) -> None:
+        """Repair history when cancellation lands mid-tool-batch: every
+        assistant tool_use must be answered by a tool_result, or the next
+        LLM request fails validation ("tool_use ids without tool_result
+        blocks") until /clear. Wires the previously-dead
+        ToolResultRecovery contract into the cancellation path."""
+        have = {block.tool_use_id for block in collected}
+        missing = [
+            ToolResultBlock(
+                tool_use_id=tc.tool_id,
+                content="Error: execution was interrupted before returning a result.",
+                is_error=True,
+            )
+            for tc in pending_calls
+            if tc.tool_id and tc.tool_id not in have
+        ]
+        if collected or missing:
+            conversation.add_tool_results_message(collected + missing)
 
     def _consume_mailbox(self, conversation: ConversationManager) -> None:
         if not self.team_name or not self._team_manager:
@@ -790,6 +827,29 @@ class Agent:
         if not self.registry.is_enabled(tc.tool_name):
             return None, ToolResult(output=f"Error: tool '{tc.tool_name}' is disabled", is_error=True), False
         return tool, None, False
+
+    def _normalize_path_arguments(self, tc: ToolCallComplete) -> None:
+        """Resolve relative path arguments against THIS agent's sandbox root
+        rather than the process CWD, and give Bash a matching working
+        directory. Worktree-isolated agents run with a sandbox derived from
+        their worktree while the process CWD never chdirs — without this,
+        permission checks evaluate one location and file tools write to
+        another (the parent repo). Mutates tc.arguments in place; hooks and
+        permission checks then observe the exact paths that will be used."""
+        if self.permission_checker is None:
+            return
+        root = self.permission_checker.sandbox.project_root
+        args = tc.arguments
+        for key in ("file_path", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip() and not os.path.isabs(value):
+                args[key] = str(root / value)
+        if tc.tool_name == "Bash":
+            cwd = args.get("cwd")
+            if isinstance(cwd, str) and cwd.strip() and not os.path.isabs(cwd):
+                args["cwd"] = str(root / Path(cwd))
+            elif "cwd" not in args or not isinstance(cwd, str) or not cwd.strip():
+                args["cwd"] = str(root)
 
     async def _run_tool(self, tool: Any, tc: ToolCallComplete) -> ToolResult:
         """Shared tool execution with exception handling."""
@@ -881,6 +941,8 @@ class Agent:
                 is_unknown=is_unknown,
             )
 
+        self._normalize_path_arguments(tc)
+
         rejected = await self._run_pre_tool_hooks(tc)
         if rejected is not None:
             return ToolExecutionResult(
@@ -920,6 +982,8 @@ class Agent:
         if error is not None:
             yield error, time.monotonic() - start, is_unknown
             return
+
+        self._normalize_path_arguments(tc)
 
         # Permission check
         if self.permission_checker:

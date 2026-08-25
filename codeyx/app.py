@@ -85,7 +85,7 @@ from codeyx.tools.ask_user import AskUserEvent, AskUserTool
 from codeyx.tools.impl.tool_search import ToolSearchTool
 from codeyx.tools.load_skill import LoadSkill
 from codeyx.worktree.cleanup import start_stale_cleanup_task
-from codeyx.worktree.manager import WorktreeManager
+from codeyx.worktree.manager import WorktreeManager, WorktreeSession
 
 log = logging.getLogger(__name__)
 
@@ -728,15 +728,25 @@ class CodeYXApp(App):
         )
         restored = self.worktree_manager.restore_session()
         if restored:
-            self.agent.work_dir = restored.worktree_path
+            self._switch_session_root(restored.worktree_path)
 
         wt_command = create_worktree_command(self.worktree_manager)
         self.command_registry.register_sync(wt_command)
 
         from codeyx.tools.enter_worktree import EnterWorktreeTool
         from codeyx.tools.exit_worktree import ExitWorktreeTool
-        self.registry.register(EnterWorktreeTool(worktree_manager=self.worktree_manager))
-        self.registry.register(ExitWorktreeTool(worktree_manager=self.worktree_manager))
+        self.registry.register(
+            EnterWorktreeTool(
+                worktree_manager=self.worktree_manager,
+                on_enter=self._apply_worktree_root,
+            )
+        )
+        self.registry.register(
+            ExitWorktreeTool(
+                worktree_manager=self.worktree_manager,
+                on_exit=self._restore_worktree_root,
+            )
+        )
 
         self._stale_cleanup_task = asyncio.create_task(
             start_stale_cleanup_task(
@@ -873,6 +883,25 @@ class CodeYXApp(App):
         if event.option_list.id == "provider-list":
             provider = self.providers[event.option_index]
             self._select_provider(provider)
+
+    # -----------------------------------------------------------------
+    # Worktree re-rooting: keep process CWD, agent.work_dir and the
+    # permission sandbox on the same root when entering/exiting a worktree.
+    # -----------------------------------------------------------------
+
+    async def _apply_worktree_root(self, session: WorktreeSession) -> None:
+        self._switch_session_root(session.worktree_path)
+
+    async def _restore_worktree_root(self, session: WorktreeSession) -> None:
+        self._switch_session_root(session.original_cwd)
+
+    def _switch_session_root(self, root: str) -> None:
+        os.chdir(root)
+        if self.agent is not None:
+            self.agent.work_dir = root
+            checker = self.agent.permission_checker
+            if checker is not None:
+                checker.sandbox.rebase(root)
 
     # -----------------------------------------------------------------
     # UIController protocol implementation
@@ -1653,6 +1682,21 @@ class CodeYXApp(App):
             except Exception:
                 pass
             return
+
+        await self._shutdown()
+
+    async def action_quit(self) -> None:
+        """Ctrl+Q hits Textual's default quit binding, which used to bypass
+        the entire teardown (MCP children left alive, tmux teammate panes
+        orphaned, worktrees leaked, shutdown hooks skipped). Route it through
+        the same shutdown path as Ctrl+C."""
+        await self._shutdown()
+
+    async def _shutdown(self) -> None:
+        if getattr(self, "_shutdown_started", False):
+            self.exit()
+            return
+        self._shutdown_started = True
 
         if self.agent and self.agent.memory_manager:
             try:

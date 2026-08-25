@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import string
 from dataclasses import dataclass, field
@@ -444,6 +445,12 @@ class SessionManager:
                     records.append(record)
 
         valid_count = validate_message_chain(records)
+        if valid_count < len(records):
+            # A crash landed between an assistant tool_use record and its
+            # tool_result: everything after is unrecoverable on every read.
+            # Rewrite the file to exactly the valid prefix (atomic replace)
+            # so future appends survive the next resume.
+            self._rewrite_jsonl_prefix(jsonl_path, records[:valid_count])
         records = records[:valid_count]
         messages = records_to_messages(records)
 
@@ -460,6 +467,21 @@ class SessionManager:
             messages=messages,
             last_active=meta.last_active,
         )
+
+    @staticmethod
+    def _rewrite_jsonl_prefix(jsonl_path: Path, records: list[SessionRecord]) -> None:
+        """Atomically truncate the jsonl to the given valid records."""
+        tmp = jsonl_path.with_name(f".{jsonl_path.name}.{os.getpid()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                for record in records:
+                    f.write(record.to_jsonl() + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, jsonl_path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def delete(self, session_id: str) -> bool:
         jsonl_path = self._sessions_dir / f"{session_id}.jsonl"

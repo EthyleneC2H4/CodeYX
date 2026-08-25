@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -10,7 +11,7 @@ from codeyx.tools.base import Tool, ToolResult
 from codeyx.worktree.slug import validate_slug
 
 if TYPE_CHECKING:
-    from codeyx.worktree.manager import WorktreeManager
+    from codeyx.worktree.manager import WorktreeManager, WorktreeSession
 
 
 class EnterWorktreeParams(BaseModel):
@@ -34,8 +35,16 @@ class EnterWorktreeTool(Tool):
     should_defer = True
 
 
-    def __init__(self, worktree_manager: WorktreeManager) -> None:
+    def __init__(
+        self,
+        worktree_manager: WorktreeManager,
+        on_enter: Callable[[WorktreeSession], Awaitable[None]] | None = None,
+    ) -> None:
         self._manager = worktree_manager
+        # Host callback that actually re-roots the live session (chdir,
+        # agent.work_dir, sandbox root). Without it the tool only records
+        # bookkeeping and later edits land in the original tree.
+        self._on_enter = on_enter
 
 
     async def execute(self, params: EnterWorktreeParams) -> ToolResult:
@@ -59,10 +68,24 @@ class EnterWorktreeTool(Tool):
             )
 
         branch_info = f" on branch {wt.branch}" if wt.branch else ""
+
+        switch_error = ""
+        if self._on_enter is not None:
+            try:
+                await self._on_enter(session)
+            except Exception as e:
+                switch_error = (
+                    f" WARNING: the session could not be switched into the "
+                    f"worktree ({e}); subsequent relative paths still resolve "
+                    f"to the original directory."
+                )
+
         return ToolResult(
             output=(
                 f"Created worktree at {session.worktree_path}{branch_info}. "
                 "The session is now working in the worktree. "
                 "Use ExitWorktree to leave mid-session, or exit the session to be prompted."
-            )
+                f"{switch_error}"
+            ),
+            is_error=bool(switch_error),
         )
