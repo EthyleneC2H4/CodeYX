@@ -13,7 +13,13 @@ from typing import IO, TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from codeyx.client import LLMClient
 
-from codeyx.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from codeyx.conversation import (
+    ConversationManager,
+    Message,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 SESSIONS_DIR = ".codeyx/sessions"
 TIME_GAP_THRESHOLD = timedelta(hours=24)
@@ -91,8 +97,19 @@ class SessionRecord:
                     )
                 )
         elif message.role == "assistant":
-            if message.tool_uses:
+            if message.tool_uses or message.thinking_blocks:
+                # Block form. Thinking blocks must round-trip (and stay
+                # first): Anthropic rejects a replayed assistant tool_use
+                # turn whose paired thinking block went missing.
                 content_blocks: list[dict[str, Any]] = []
+                for tb in message.thinking_blocks:
+                    content_blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": tb.thinking,
+                            "signature": tb.signature,
+                        }
+                    )
                 if message.content:
                     content_blocks.append({"type": "text", "text": message.content})
                 for tu in message.tool_uses:
@@ -167,11 +184,19 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             if isinstance(record.content, list):
                 text = ""
                 tool_uses: list[ToolUseBlock] = []
+                thinking_blocks: list[ThinkingBlock] = []
                 for block in record.content:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "text":
                         text += block.get("text", "")
+                    elif block.get("type") == "thinking":
+                        thinking_blocks.append(
+                            ThinkingBlock(
+                                thinking=block.get("thinking", ""),
+                                signature=block.get("signature", ""),
+                            )
+                        )
                     elif block.get("type") == "tool_use":
                         tool_uses.append(
                             ToolUseBlock(
@@ -181,7 +206,12 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
                             )
                         )
                 messages.append(
-                    Message(role="assistant", content=text, tool_uses=tool_uses)
+                    Message(
+                        role="assistant",
+                        content=text,
+                        tool_uses=tool_uses,
+                        thinking_blocks=thinking_blocks,
+                    )
                 )
             else:
                 messages.append(

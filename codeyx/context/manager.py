@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,10 +134,38 @@ def reconstruct_replacement_state(
 # Session directory management
 # ---------------------------------------------------------------------------
 
-def ensure_session_dir(work_dir: str) -> Path:
+def ensure_session_dir(work_dir: str, scope: str | None = None) -> Path:
+    """Create (and return) this agent's tool-result directory.
+
+    With ``scope`` set, each agent gets its own subdirectory so one agent's
+    compaction cannot rmtree files that sibling agents' conversations still
+    reference via persisted-output paths. Old scope directories are pruned
+    after a week of inactivity, mirroring SessionManager.cleanup."""
     session_dir = Path(work_dir) / SESSION_SUBDIR
+    if scope:
+        session_dir = session_dir / scope
+        _prune_stale_scope_dirs(session_dir.parent)
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
+
+
+SCOPE_MAX_AGE_DAYS = 7
+
+
+def _prune_stale_scope_dirs(scopes_dir: Path) -> None:
+    if not scopes_dir.is_dir():
+        return
+    cutoff = datetime.now(UTC).timestamp() - SCOPE_MAX_AGE_DAYS * 86400
+    try:
+        entries = list(scopes_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def cleanup_tool_results(session_dir: Path) -> None:
@@ -363,7 +392,13 @@ def apply_tool_result_budget(
 def compute_compact_threshold(context_window: int, manual: bool = False) -> int:
     effective = context_window - SUMMARY_OUTPUT_RESERVE
     margin = MANUAL_COMPACT_SAFETY_MARGIN if manual else AUTO_COMPACT_SAFETY_MARGIN
-    return effective - margin
+    threshold = effective - margin
+    if threshold <= 0:
+        # Legitimately small windows cannot absorb the full reserve; a
+        # non-positive threshold trips auto-compact on EVERY turn, wiping
+        # history after each exchange. Fall back to proportional headroom.
+        threshold = max(context_window // 2, 1)
+    return threshold
 
 
 def should_auto_compact(last_input_tokens: int, context_window: int) -> bool:

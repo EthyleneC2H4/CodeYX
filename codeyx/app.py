@@ -89,6 +89,11 @@ from codeyx.worktree.manager import WorktreeManager, WorktreeSession
 
 log = logging.getLogger(__name__)
 
+# Commands that replace or compact the live conversation; refused while a
+# response is streaming because the in-flight agent loop still holds the old
+# conversation object.
+_STREAM_UNSAFE_COMMANDS = {"clear", "compact", "session"}
+
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
     """Done-callback so fire-and-forget tasks can't drop exceptions."""
@@ -563,6 +568,10 @@ class CodeYXApp(App):
         self._spinner_idx: int = 0
         self._spinner_timer = None
         self._agent_task: asyncio.Task[None] | None = None
+        # True between a synchronous claim and the turn actually running;
+        # closes the create_task→first-await window where two schedulers
+        # could otherwise both start a loop.
+        self._turn_starting = False
         self._subagent_start_time: float | None = None
         # /session resume candidate ids, shared by reference across command
         # invocations so "resume <n>" can resolve on the following command.
@@ -873,7 +882,7 @@ class CodeYXApp(App):
             self.agent.team_name = boot_team
             self.agent._team_manager = self.team_manager
         boot_prompt = self._boot.get("prompt")
-        if boot_prompt and self.agent is not None:
+        if boot_prompt and self.agent is not None and self._try_claim_turn():
             self._boot_prompt_task = asyncio.create_task(
                 self._send_message(boot_prompt)
             )
@@ -973,7 +982,7 @@ class CodeYXApp(App):
         name, args, is_command = parse_command(text)
 
         if not is_command:
-            if self._streaming or self.agent is None:
+            if self.agent is None or not self._try_claim_turn():
                 return
             self._agent_task = asyncio.create_task(self._send_message(text))
             return
@@ -1018,7 +1027,19 @@ class CodeYXApp(App):
                 self._stop_spinner()
                 self._show_system_message("(response interrupted)")
                 await asyncio.sleep(0.05)
+        elif self._streaming:
+            if self._is_stream_unsafe_command(text):
+                self._show_system_message(
+                    "响应生成中无法执行该命令：先按 Esc 打断当前回复。"
+                )
+                return
         await self._dispatch_command(text)
+
+    def _is_stream_unsafe_command(self, text: str) -> bool:
+        """Commands that replace or compact the live conversation must not
+        run while a response is streaming."""
+        name, _args, is_command = parse_command(text)
+        return is_command and name in _STREAM_UNSAFE_COMMANDS
 
     def on_chat_input_tab_complete(self, event: ChatInput.TabComplete) -> None:
         matches = complete(self.command_registry, event.text)
@@ -1113,11 +1134,26 @@ class CodeYXApp(App):
         if current is not None:
             self._agent_task = current
 
+        # This claimed turn is running now; _streaming takes over as the
+        # active-turn mutex from here until the finally below.
+        self._turn_starting = False
+        self._streaming = True
         try:
             await self._send_message_inner(text, is_notification)
         finally:
             if current is not None and self._agent_task is current:
                 self._agent_task = None
+
+    def _try_claim_turn(self) -> bool:
+        """Synchronously claim exclusive rights to start an agent turn.
+
+        The check-and-set runs without awaiting, so two racing schedulers
+        (user input vs notification auto-turn) can never both win. Claimed
+        turns hand the mutex to `_streaming` once actually running."""
+        if self._streaming or self._turn_starting:
+            return False
+        self._turn_starting = True
+        return True
 
     async def _send_message_inner(
         self, text: str, is_notification: bool = False
@@ -1357,15 +1393,25 @@ class CodeYXApp(App):
             if hasattr(self, 'team_manager'):
                 self.team_manager.on_teammate_completed(task.agent.agent_id)
 
+        # Claim the turn mutex synchronously before scheduling: otherwise a
+        # user message (or Escape + typed input) racing this auto-turn can
+        # start a second concurrent loop over the same conversation.
+        if not self._try_claim_turn():
+            return
         self._agent_task = asyncio.create_task(
             self._send_message("", is_notification=True)
         )
 
     async def _start_notification_polling(self) -> None:
-        while True:
-            await asyncio.sleep(3)
-            if not self._streaming and self.agent is not None:
-                await self._process_task_notifications()
+        try:
+            while True:
+                await asyncio.sleep(3)
+                if getattr(self, "_shutdown_started", False):
+                    return
+                if not self._streaming and self.agent is not None:
+                    await self._process_task_notifications()
+        except asyncio.CancelledError:
+            pass
 
     async def _show_plan_approval(self) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
@@ -1698,13 +1744,30 @@ class CodeYXApp(App):
             return
         self._shutdown_started = True
 
+        # Stop background loops before teardown: the notification poller
+        # would otherwise keep waking up mid-shutdown and can start a fresh
+        # agent turn on an already-closed session.
+        for attr in ("_notification_check_task", "_boot_prompt_task"):
+            bg = getattr(self, attr, None)
+            if bg is not None and not bg.done():
+                bg.cancel()
+
         if self.agent and self.agent.memory_manager:
+            # A periodic extraction may still be in flight; awaiting it first
+            # lets the final pass below actually run instead of silently
+            # no-op'ing on the _extracting guard.
+            memory_task = getattr(self.agent, "_memory_task", None)
+            if memory_task is not None and not memory_task.done():
+                try:
+                    await asyncio.wait_for(memory_task, timeout=10.0)
+                except Exception:
+                    pass
             try:
                 await asyncio.wait_for(
                     self.agent._extract_memories(self.conversation),
                     timeout=10.0,
                 )
-            except (TimeoutError, Exception):
+            except Exception:
                 pass
 
         if self.hook_engine:

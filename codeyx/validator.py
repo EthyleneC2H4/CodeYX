@@ -201,19 +201,27 @@ def validate_teammate_mode(mode: object) -> str:
     return mode
 
 
-def validate_config_structure(raw: object) -> dict:
+def validate_config_structure(raw: object, *, require_providers: bool = True) -> dict:
     """Main validation entry point. Validates raw parsed config and returns cleaned dict.
+
+    ``require_providers=False`` relaxes the providers requirement for layered
+    config files: an override layer may legitimately set only a few keys
+    (e.g. just `permission_mode`). The fully-merged result is still checked
+    by the loader.
 
     Returns a dict with keys:
         providers, permission_mode, mcp_servers, hooks,
         enable_fork, enable_verification_agent, worktree,
         teammate_mode, enable_coordinator_mode
     """
-    if not isinstance(raw, dict) or "providers" not in raw:
+    if not isinstance(raw, dict):
+        raise ConfigError("Config must contain a 'providers' list")
+    if require_providers and "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
 
+    providers_raw = raw.get("providers", [])
     return {
-        "providers": validate_providers(raw["providers"]),
+        "providers": validate_providers(providers_raw) if providers_raw else [],
         "permission_mode": validate_permission_mode(raw.get("permission_mode", "default")),
         "mcp_servers": validate_mcp_servers(raw.get("mcp_servers")),
         "hooks": validate_hooks(raw.get("hooks")),

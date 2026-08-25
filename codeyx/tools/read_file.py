@@ -40,7 +40,9 @@ class ReadFile(Tool):
         resolved = str(path.resolve())
 
         try:
-            text = self._cache.get(resolved) if self._cache else None
+            # get_fresh stat-checks so Bash-side edits (sed -i, git checkout,
+            # …) that never call invalidate() still show up on the next read.
+            text = self._cache.get_fresh(resolved) if self._cache else None
             if text is None:
                 text = path.read_text(encoding="utf-8")
                 if self._cache:

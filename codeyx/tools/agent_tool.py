@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -430,19 +431,34 @@ class AgentTool(Tool):
         )
         self._team_manager.register_member(p.team_name, member)
 
-        # 8. Spawn by backend
-        if backend in (BackendType.TMUX, BackendType.ITERM2):
-            return self._spawn_pane_teammate(
-                p, team, member, backend, wt, agent_id, teammate_name
-            )
+        # 8. Spawn by backend. Failure after this point must roll back the
+        # registration and worktree — a phantom active member makes the team
+        # permanently undeletable.
+        try:
+            if backend in (BackendType.TMUX, BackendType.ITERM2):
+                return self._spawn_pane_teammate(
+                    p, team, member, backend, wt, agent_id, teammate_name
+                )
 
-        # In-process: use task_manager only (it handles execution + notification)
-        task_id = self._task_manager.launch(
-            agent=sub_agent,
-            task="" if is_fork else p.prompt,
-            name=teammate_name,
-            fork_conversation=conversation if is_fork else None,
-        )
+            # In-process: use task_manager only (it handles execution + notification)
+            task_id = self._task_manager.launch(
+                agent=sub_agent,
+                task="" if is_fork else p.prompt,
+                name=teammate_name,
+                fork_conversation=conversation if is_fork else None,
+            )
+        except Exception as e:
+            log.warning("Teammate '%s' spawn failed: %s", teammate_name, e)
+            self._team_manager.remove_member(p.team_name, member)
+            await self._worktree_cleanup_quietly(wt_name, wt.head_commit)
+            return ToolResult(
+                output=(
+                    f"Failed to spawn teammate '{teammate_name}': {e}. "
+                    "Registration and worktree were rolled back; retry or "
+                    "set teammate_mode to in-process."
+                ),
+                is_error=True,
+            )
 
         return ToolResult(
             output=(
@@ -491,11 +507,9 @@ class AgentTool(Tool):
                 )
                 self._team_manager.register_pane_id(agent_id, pane_info.pane_id)
         except Exception as e:
-            log.warning("Pane spawn failed, falling back to in-process: %s", e)
-            return ToolResult(
-                output=f"Pane spawn failed ({e}), teammate not started. Retry or set teammate_mode to in-process.",
-                is_error=True,
-            )
+            log.warning("Pane spawn failed: %s", e)
+            # Let the caller roll back member registration + worktree.
+            raise
 
         return ToolResult(
             output=(
@@ -627,22 +641,18 @@ class AgentTool(Tool):
 
         try:
             result_text = await sub_agent.run_to_completion(task)
+        except asyncio.CancelledError:
+            # Parent cancelled while awaiting this sub-agent: CancelledError
+            # bypasses `except Exception`, so without this branch the
+            # worktree + branch leak every time.
+            self._trace_manager.complete(trace_node.agent_id, "cancelled")
+            await self._worktree_cleanup_quietly(wt_name, wt.head_commit)
+            raise
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
             # The run failed but the worktree still needs its cleanup pass —
             # otherwise an aborted sub-agent leaks a worktree + branch.
-            try:
-                cleanup = await self._worktree_manager.auto_cleanup(
-                    wt_name, wt.head_commit
-                )
-                kept_note = (
-                    f"\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
-                    if cleanup.kept
-                    else ""
-                )
-            except Exception as ce:
-                log.warning("Worktree auto-cleanup failed for %s: %s", wt_name, ce)
-                kept_note = ""
+            kept_note = await self._worktree_cleanup_quietly(wt_name, wt.head_commit)
             return ToolResult(
                 output=f"Sub-agent in worktree failed: {e}{kept_note}",
                 is_error=True,
@@ -662,6 +672,20 @@ class AgentTool(Tool):
             )
 
         return ToolResult(output=result_text or "(sub-agent returned no output)")
+
+    async def _worktree_cleanup_quietly(self, wt_name: str, head_commit: str) -> str:
+        """Best-effort auto_cleanup; returns a note when the worktree was
+        preserved as dirty, empty string otherwise."""
+        try:
+            cleanup = await self._worktree_manager.auto_cleanup(wt_name, head_commit)
+            return (
+                f"\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
+                if cleanup.kept
+                else ""
+            )
+        except Exception as ce:
+            log.warning("Worktree auto-cleanup failed for %s: %s", wt_name, ce)
+            return ""
 
 
     def _create_client_for_model(self, model_alias: str) -> LLMClient | None:

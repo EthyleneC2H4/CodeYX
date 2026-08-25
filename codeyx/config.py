@@ -106,6 +106,13 @@ class AppConfig:
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
+    # Top-level (and worktree-level) keys actually present in the source
+    # file. Replaces the old "differs from default" sentinel so an upper
+    # layer can explicitly set a field BACK to its default value — e.g. a
+    # project overriding a user-level `permission_mode: acceptEdits` with
+    # `permission_mode: default` used to be silently ignored.
+    explicit: set[str] = field(default_factory=set)
+    worktree_explicit: set[str] = field(default_factory=set)
 
 
 def _load_single_file(path: Path) -> AppConfig:
@@ -114,7 +121,9 @@ def _load_single_file(path: Path) -> AppConfig:
     except yaml.YAMLError as e:
         raise ConfigError(f"Failed to parse config {path}: {e}") from e
 
-    validated = validate_config_structure(raw)
+    # Layers may override only a few keys; the merged result must still
+    # carry providers (checked in load_config).
+    validated = validate_config_structure(raw, require_providers=False)
 
     providers = [
         ProviderConfig(
@@ -151,7 +160,7 @@ def _load_single_file(path: Path) -> AppConfig:
         stale_cutoff_hours=wt["stale_cutoff_hours"],
     )
 
-    return AppConfig(
+    cfg = AppConfig(
         providers=providers,
         permission_mode=validated["permission_mode"],
         mcp_servers=mcp_servers,
@@ -162,12 +171,19 @@ def _load_single_file(path: Path) -> AppConfig:
         teammate_mode=validated["teammate_mode"],
         enable_coordinator_mode=validated["enable_coordinator_mode"],
     )
+    raw_keys = set(raw.keys()) if isinstance(raw, dict) else set()
+    wt_raw = raw.get("worktree") if isinstance(raw, dict) else None
+    cfg.explicit = raw_keys
+    cfg.worktree_explicit = set(wt_raw.keys()) if isinstance(wt_raw, dict) else set()
+    return cfg
 
 
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
-    if override.providers:
+    # Presence-based merge: a key counts only when the overriding file
+    # actually wrote it, so an upper layer can reset a field to its default.
+    if "providers" in override.explicit and override.providers:
         base.providers = override.providers
-    if override.permission_mode != "default":
+    if "permission_mode" in override.explicit:
         base.permission_mode = override.permission_mode
 
     if override.mcp_servers:
@@ -180,22 +196,22 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
                 by_name[s.name] = len(base.mcp_servers) - 1
 
     base.raw_hooks.extend(override.raw_hooks)
-    if override.enable_fork:
-        base.enable_fork = True
-    if override.enable_verification_agent:
-        base.enable_verification_agent = True
-    if override.teammate_mode:
+    if "enable_fork" in override.explicit:
+        base.enable_fork = override.enable_fork
+    if "enable_verification_agent" in override.explicit:
+        base.enable_verification_agent = override.enable_verification_agent
+    if "teammate_mode" in override.explicit:
         base.teammate_mode = override.teammate_mode
-    if override.enable_coordinator_mode:
-        base.enable_coordinator_mode = True
+    if "enable_coordinator_mode" in override.explicit:
+        base.enable_coordinator_mode = override.enable_coordinator_mode
 
-    wt_defaults = WorktreeConfig()
-    if override.worktree.symlink_directories != wt_defaults.symlink_directories:
-        base.worktree.symlink_directories = override.worktree.symlink_directories
-    if override.worktree.stale_cleanup_interval != wt_defaults.stale_cleanup_interval:
-        base.worktree.stale_cleanup_interval = override.worktree.stale_cleanup_interval
-    if override.worktree.stale_cutoff_hours != wt_defaults.stale_cutoff_hours:
-        base.worktree.stale_cutoff_hours = override.worktree.stale_cutoff_hours
+    for key in (
+        "symlink_directories",
+        "stale_cleanup_interval",
+        "stale_cutoff_hours",
+    ):
+        if key in override.worktree_explicit:
+            setattr(base.worktree, key, getattr(override.worktree, key))
     return base
 
 
@@ -228,4 +244,6 @@ def load_config(path: Path | None = None) -> AppConfig:
             "No config file found. Expected .codeyx/config.yaml "
             "in project or ~/.codeyx/config.yaml"
         )
+    if not merged.providers:
+        raise ConfigError("Config must contain a 'providers' list")
     return merged

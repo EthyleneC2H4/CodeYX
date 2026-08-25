@@ -134,6 +134,20 @@ class TeamManager:
         self._teammate_team_map[member.agent_id] = team_name
         log.info("Registered member '%s' (agent=%s) in team '%s'", member.name, member.agent_id, team_name)
 
+    def remove_member(self, team_name: str, member: TeammateInfo) -> None:
+        """Undo register_member. Called when spawning a teammate fails after
+        registration: otherwise the member stays is_active=True forever and
+        delete_team refuses to run, plus its worktree leaks."""
+        team = self.get_team(team_name)
+        if team is not None:
+            team.members = [m for m in team.members if m.agent_id != member.agent_id]
+            team.save()
+        AgentNameRegistry.instance().unregister(member.name)
+        self._teammate_team_map.pop(member.agent_id, None)
+        self._inprocess_handles.pop(member.agent_id, None)
+        self._pane_ids.pop(member.agent_id, None)
+        log.info("Removed member '%s' from team '%s' (spawn rollback)", member.name, team_name)
+
     def set_member_idle(self, team_name: str, member_name: str) -> None:
         team = self.get_team(team_name)
         if team is None:
@@ -233,20 +247,26 @@ class TeamManager:
             log.warning("Failed to kill pane %s: %s", pane_id, e)
 
     def _cleanup_worktree(self, worktree_path: str) -> None:
+        """Remove a teammate worktree WITHOUT --force. Git itself refuses
+        when the tree has uncommitted/untracked content, so uncommitted
+        teammate work survives team deletion — the same 'dirty worktrees are
+        preserved' policy as ExitWorktree. Committed work always survives on
+        the branch. The previous --force + rmtree fallback silently destroyed
+        uncommitted work."""
         import subprocess
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", worktree_path, "--force"],
+            result = subprocess.run(
+                ["git", "worktree", "remove", worktree_path],
                 capture_output=True, timeout=10,
             )
+            if result.returncode != 0:
+                detail = (result.stderr or "").decode(errors="replace").strip()
+                log.warning(
+                    "Kept teammate worktree %s (git refused to remove: %s)",
+                    worktree_path, detail,
+                )
         except Exception as e:
             log.warning("git worktree remove failed for %s: %s", worktree_path, e)
-            import shutil
-            try:
-                if Path(worktree_path).exists():
-                    shutil.rmtree(worktree_path, ignore_errors=True)
-            except Exception:
-                pass
 
     def _remove_dir(self, path: Path) -> None:
         import shutil

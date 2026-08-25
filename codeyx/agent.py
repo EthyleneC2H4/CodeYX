@@ -284,7 +284,10 @@ class Agent:
             permission_checker.mode if permission_checker else PermissionMode.DEFAULT
         )
         self.context_window = context_window
-        self.session_dir = ensure_session_dir(work_dir)
+        # Per-agent scope: compaction rmtrees this dir, so sharing one dir
+        # across agents (subagents, teammates) would delete files their
+        # conversations still reference.
+        self.session_dir = ensure_session_dir(work_dir, scope=uuid.uuid4().hex[:12])
         self.compact_breaker = CompactCircuitBreaker()
         self.replacement_state: ContentReplacementState = create_replacement_state()
         # Holds snapshots needed to rebuild working context after Layer 2
