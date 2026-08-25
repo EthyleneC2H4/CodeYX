@@ -1,158 +1,264 @@
-# CodeYX
+<div align="center">
 
-A lightweight terminal-native AI Coding Agent built from scratch in Python. It gives LLMs the ability to read, write, and execute code autonomously through a structured tool-calling loop.
+# ⚡ CodeYX
 
-## Architecture
+**A terminal-native AI coding agent — built from scratch in Python.**
 
-CodeYX is organized into five layers, each responsible for a distinct concern:
+Reads, writes, and executes code autonomously through a structured tool-calling loop,
+with a five-tier permission model keeping every action accountable.
 
+[![CI](https://github.com/EthyleneC2H4/CodeYX/actions/workflows/test.yml/badge.svg)](https://github.com/EthyleneC2H4/CodeYX/actions/workflows/test.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-647%20passing-brightgreen.svg)](#running-tests)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](#-license)
+[![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](pyproject.toml)
+
+**English** · [简体中文](README.zh-CN.md)
+
+</div>
+
+---
+
+## Why CodeYX?
+
+Most AI coding assistants are hosted services or thin wrappers around proprietary stacks.
+CodeYX is a **from-scratch, fully local agent runtime**: the ReAct loop, tool scheduler,
+permission engine, context compressor, memory system, and multi-agent orchestration are
+all implemented directly on `asyncio` — no framework lock-in, every layer inspectable.
+
+```text
+❯ /plan Add JWT auth to the API
+  ✻ Planning… reads routes.py, auth.py, tests/
+  ── Plan written to .codeyx/plans/bold-spark-0825-1432.md
+  ── [1] YOLO  [2] Manual  [3] Feedback
+❯ 1
+  ✻ Writing src/auth/jwt.py … ✓
+  ✻ Editing src/api/routes.py … ✓
+  ✻ Bash: pytest tests/auth -q … 24 passed
 ```
-  Presentation  ──  Textual TUI + Slash Commands
-  Engine        ──  ReAct Agent Loop + Conversation Management
-  Tooling       ──  File I/O / Bash / Search / MCP / Sub-agents
-  Memory        ──  Auto-memory Extraction + Session Persistence
-  Security      ──  Five-tier Permission + Sandbox + Rule Engine
-```
 
-The Agent loop follows the ReAct pattern: LLM generates text or tool calls → Agent executes tools → results feed back → iterate. A Plan Mode variant (`/plan`) lets the Agent design an implementation strategy before writing any code; on plan approval the user can jump straight into auto-approved execution.
+## ✨ Features
 
-## Features
-
-- **Multi-protocol LLM support** — Anthropic Messages API, OpenAI Responses API, OpenAI-compatible Chat Completions (vLLM, Ollama, etc.), and DeepSeek -- all unified behind a single `stream()` interface
-- **30+ built-in tools** — ReadFile, WriteFile, EditFile, Bash, Glob, Grep, Agent (sub-agent spawning), TaskCreate/Get/List/Update, TeamCreate/Delete, and more
-- **Five-tier permission model** — Plan Mode exceptions → safe command whitelist → dangerous command blacklist → path sandbox → rule engine → permission mode matrix → human confirmation. Any tier can deny; rejection short-circuits. Serial and parallel tool execution share one authorization pipeline, so batching cannot bypass checks.
-- **Two-layer context compression** — Layer 1 applies per-turn tool-result budget controls with disk persistence. Layer 2 triggers LLM-based summarisation when approaching the context window, with Recovery State to re-attach snapped file reads after compaction.
-- **Cross-session memory** — An LLM-driven extractor runs every 5 turns to classify memories into four types (user preferences, feedback, project knowledge, references) and persist them to disk. New sessions automatically inherit accumulated context.
-- **MCP integration** — Connect to external tool servers via the Model Context Protocol (stdio and Streamable HTTP). All MCP tools are deferred -- only loaded on demand -- keeping the initial context window lean. Connects and tool calls are bounded by explicit timeouts so a hung server cannot stall the loop.
-- **Skill system** — Reusable prompt templates packaged as Markdown files with YAML frontmatter, invokable via `/skill`. Fork-mode skills run in an isolated agent with an inherited, auto-approving permission checker.
-- **Sub-agents & Teams** — Spawn isolated agents with filtered tool sets, custom models, and optional Git worktree isolation (`isolation: worktree`, ephemeral worktrees auto-named and swept when stale; dirty worktrees are preserved at shutdown). Team mode supports parallel multi-agent collaboration with file-system mailbox communication (atomic claim semantics) and Coordinator pattern orchestration. Teammates can also be launched as real terminal processes (`codeyx --work-dir … --team … --agent-name … --prompt …`) inside tmux/iTerm2 panes.
-- **Hooks engine** — Inject shell commands, HTTP calls, or prompt text at 15 lifecycle events (`pre_tool_use`, `post_tool_use`, `session_start`, etc.) with conditional execution (`==`, `!=`, regex, fnmatch) and optional tool rejection. Template interpolation is shell-quoted by default and every hook action runs under an enforced timeout.
-
-## Tech Stack
-
-| Component | Choice |
+| | |
 |---|---|
-| Language | Python 3.11+ |
-| TUI Framework | [Textual](https://textual.textualize.io/) |
-| Data Validation | Pydantic |
-| LLM SDKs | Anthropic SDK, OpenAI SDK |
-| MCP | `mcp` (Model Context Protocol SDK) |
-| Async | `asyncio` (native) |
-| Testing | pytest + pytest-asyncio, security test suite, perf harness |
+| 🌐 **Multi-protocol LLM support** | Anthropic Messages, OpenAI Responses, OpenAI-compatible Chat Completions (vLLM, Ollama, …), and DeepSeek — unified behind one `stream()` interface. |
+| 🧰 **30+ built-in tools** | ReadFile / WriteFile / EditFile / Bash / Glob / Grep / Agent (sub-agents) / Task* / Team* and more. |
+| 🛡️ **Five-tier permission model** | Plan-mode exceptions → safe-command whitelist → dangerous-command blacklist → path sandbox → rule engine → mode matrix → human confirmation. Any tier can deny; first denial short-circuits. |
+| 🗜️ **Two-layer context compression** | Per-turn tool-result budgets with disk persistence, then LLM summarisation near the window limit — with recovery snapshots that re-attach file reads after compaction. Decisions are frozen across turns to keep prompt-cache prefixes byte-identical. |
+| 🧠 **Cross-session memory** | An LLM extractor runs every 5 turns to classify memories (preferences / feedback / project knowledge / references) to disk; new sessions inherit them automatically. |
+| 🔌 **MCP integration** | stdio + Streamable HTTP servers via the Model Context Protocol. Tools are deferred — only names advertised, schemas discovered on demand (~85% initial-token saving in multi-server setups). Explicit connect/call timeouts so a hung server never stalls the loop. |
+| 🧩 **Skill system** | Reusable prompt templates as Markdown + YAML frontmatter, invokable via `/skill`. Fork-mode skills run in an isolated agent with inherited permissions. |
+| 👥 **Sub-agents & Teams** | Isolated agents with filtered toolsets, custom models, optional git-worktree isolation. Teams collaborate through atomic filesystem mailboxes under Coordinator orchestration — in-process, tmux, or iTerm2 panes running real `codeyx` processes. |
+| 🪝 **Hooks engine** | Shell / HTTP / prompt actions at 15 lifecycle events with conditional matching (`==`, `!=`, regex, fnmatch), shell-quoted interpolation, enforced timeouts, and pre-tool rejection. |
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- Python 3.11 or later
-- [uv](https://docs.astral.sh/uv/) (or pip)
+- Python **3.11+**
+- [uv](https://docs.astral.sh/uv/) *(recommended)* or pip
+- An API key for at least one provider
 
-### 1. Configuration
+### Install & launch
 
-Copy [`config.example.yaml`](config.example.yaml) to `.codeyx/config.yaml` in your project directory (or `~/.codeyx/config.yaml` for user-wide settings):
+```bash
+git clone https://github.com/EthyleneC2H4/CodeYX.git
+cd CodeYX
+uv sync
+
+cp config.example.yaml .codeyx/config.yaml   # then fill in your key
+uv run codeyx
+```
+
+Headless one-shot (also how teammates boot inside panes):
+
+```bash
+uv run codeyx -p "summarize this repo" --work-dir /path/to/project
+
+# join a team as a named teammate
+uv run codeyx --team my-team --agent-name worker-1 --prompt "start task"
+```
+
+<details>
+<summary><b>Configuration</b> (click to expand)</summary>
+
+Config merges from user → project → local scope (`~/.codeyx/config.yaml` overrides nothing;
+`.codeyx/config.yaml` is project-local). `${VAR}` env interpolation is supported everywhere.
 
 ```yaml
 providers:
   - name: anthropic
-    protocol: anthropic
+    protocol: anthropic          # anthropic | openai | openai-compat | deepseek
     base_url: https://api.anthropic.com
-    api_key: ${ANTHROPIC_API_KEY}   # env interpolation; or omit to use the protocol default env var
     model: claude-sonnet-4-5
-    thinking: true
+    api_key: ${ANTHROPIC_API_KEY}
+    thinking: false              # extended thinking + larger output budget
+    context_window: 200000
 
-  # OpenAI example
-  # - name: openai
-  #   protocol: openai
-  #   base_url: https://api.openai.com/v1
-  #   model: gpt-4o
+# permission_mode: default       # default | acceptEdits | plan | bypassPermissions | dontAsk
 
-  # DeepSeek example
-  # - name: deepseek
-  #   protocol: deepseek
-  #   base_url: https://api.deepseek.com
-  #   model: deepseek-chat
+mcp_servers: []
+  # - name: filesystem
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
-  # OpenAI-compatible example (vLLM, Ollama, etc.)
-  # - name: local
-  #   protocol: openai-compat
-  #   base_url: http://localhost:11434/v1
-  #   api_key: "ollama"
-  #   model: llama3
-
-# Optional: MCP servers
-# mcp_servers:
-#   - name: context7
-#     command: npx
-#     args: ["-y", "@upstash/context7-mcp"]
+worktree:
+  symlink_directories: ["node_modules", ".venv", "vendor"]
+  stale_cleanup_interval: 3600
 ```
 
-**Protocol options:** `anthropic` | `openai` | `openai-compat` | `deepseek`
+Full schema: [`config.example.yaml`](config.example.yaml)
 
-### 2. Install & Run
+</details>
+
+### Running tests
 
 ```bash
-# Install dependencies
-uv sync
-
-# Launch the TUI
-uv run codeyx
-
-# Headless one-shot prompt (also used by team pane spawning)
-uv run codeyx -p "summarize this repo" --work-dir /path/to/project
-
-# Boot directly into a team as a named agent
-uv run codeyx --team my-team --agent-name worker-1 --prompt "start task"
+uv run pytest                    # full suite — 647 tests
+uv run ruff check codeyx tests   # lint gate
 ```
 
-### 3. Running Tests
+## 🏗️ Architecture
 
-```bash
-uv run pytest                      # full suite (600+ tests)
-uv run ruff check codeyx tests    # lint gate (CI-blocking subset clean)
+Five layers, each independently inspectable:
+
+```text
+┌─────────────────────────────────────────────────────┐
+│  Presentation   Textual TUI · slash commands        │
+├─────────────────────────────────────────────────────┤
+│  Engine         ReAct loop · conversation manager   │
+├─────────────────────────────────────────────────────┤
+│  Tooling        File I/O · Bash · search · MCP      │
+│                 sub-agents · teams                  │
+├─────────────────────────────────────────────────────┤
+│  Memory         Auto-memory · session persistence   │
+├─────────────────────────────────────────────────────┤
+│  Security       5-tier permissions · sandbox ·      │
+│                 rules · hooks                       │
+└─────────────────────────────────────────────────────┘
 ```
 
-## Project Structure
-
-```
+```text
 codeyx/
-  agent.py          Core ReAct loop (async generator, event-driven)
-  client.py         LLM abstraction (Anthropic / OpenAI / DeepSeek / OpenAI-Compat)
-  app.py            Textual TUI application
-  prompts.py        System prompt assembly (priority-ordered sections)
-  conversation.py   Message model + multi-protocol serialisation
-  config.py         YAML config loading (user → project → local merging)
-  validator.py      Config schema validation
-
-  tools/            All built-in tools (base.py + 20+ implementations)
-  permissions/      Five-tier permission checker + dangerous command detector + sandbox
-  runtime/          Tool execution scheduler (serial + bounded-concurrency parallel)
-  context/          Two-layer context compression + ContentReplacementState
-  memory/           Auto-memory extraction + session persistence + instruction loading
-  agents/           Sub-agent definitions, loading, tool filtering, task management
-  teams/            Multi-agent teams (mailbox, coordinator, tmux/iterm2/in-process backends)
-  hooks/            Lifecycle hooks (15 events, 4 action types, conditional execution)
-  mcp/              MCP client, manager, tool wrapper
-  skills/           Skill loader, parser, executor
-  commands/         Slash-command registry and handlers
-  worktree/         Git worktree management for agent isolation
+├── agent.py          # core ReAct loop (async generator, typed AgentEvents)
+├── app.py            # Textual TUI application
+├── client.py         # LLM abstraction (4 protocols)
+├── conversation.py   # message model + multi-protocol serialisation
+├── prompts.py        # priority-ordered system-prompt assembly
+├── tools/            # built-in tools (base + 20+ implementations)
+├── runtime/          # serial + bounded-concurrency tool scheduler
+├── permissions/      # checker · dangerous detector · sandbox · rules
+├── context/          # 2-layer compression + ContentReplacementState
+├── memory/           # auto-memory extraction + session persistence
+├── agents/           # sub-agent defs, loading, tool filtering, tasks
+├── teams/            # mailbox · coordinator · tmux/iterm2/in-process
+├── hooks/            # lifecycle hooks (15 events, 4 action types)
+├── mcp/              # MCP client · manager · deferred tool wrapper
+├── skills/           # skill loader · parser · executor
+├── commands/         # slash-command registry + handlers
+└── worktree/         # git worktree isolation + lifecycle cleanup
 ```
 
-## Key Design Decisions
+## 🔒 The security model, concretely
 
-**AsyncIterator event stream.** `Agent.run()` yields typed `AgentEvent` dataclasses consumed by the TUI. The Agent and UI are fully decoupled -- the same core can drive a TUI, an SDK, or a headless mode.
+Every tool call — serial **or** parallel — flows through the same pipeline:
 
-**One authorization pipeline for serial and parallel tools.** Both execution paths funnel through the same pre-hook → permission-check → post-hook helpers. In concurrent batches, actions requiring interactive confirmation are rejected with an actionable error instead of silently approved or deadlocked; only explicitly non-interactive contexts (e.g. sub-agents running under DONT_ASK) auto-approve.
+```text
+tool call ─► pre_tool_use hooks ─► permission pipeline ─► execute ─► post_tool_use hooks
+                                        │
+  ① plan-mode exceptions                │  any tier may DENY;
+  ② safe-command whitelist              │  first denial short-circuits.
+  ③ dangerous-command blacklist         │
+  ④ path sandbox                        │  "ask" suspends the loop on an
+  ⑤ project/local rule engine           │  asyncio.Future resolved by the TUI —
+  ⑥ mode matrix                         │  cancelling always resolves it too,
+  ⑦ human confirmation                  │  so the input can never stick.
+```
 
-**PermissionChecker.derive().** Sub-agents, skill forks, and teammates inherit the parent's detectors, rule engine, and extra sandbox roots while overriding just what differs (mode, project root). A fork gets `derive(mode=DONT_ASK)` so it can never surface a dialog it has no UI for -- deny rules still bind.
+Highlights:
 
-**ContentReplacementState (decision freezing).** Tool-result budget decisions are recorded once and frozen across turns. This keeps Anthropic prompt-cache prefixes byte-identical between requests, maintaining cache-hit rates.
+- **Parallel batches can't bypass checks.** Concurrent execution shares the authorization
+  path; ask-requiring actions are rejected with guidance instead of silently approved.
+- **Derived checkers, not fresh ones.** Sub-agents/forks/teammates inherit detectors, rules,
+  and sandbox roots via `PermissionChecker.derive()` — forks auto-approve *prompts* but deny
+  rules and hooks still bind.
+- **Token-level dangerous-command detection.** `rm -rf /` is caught in any flag order
+  (`--force --recursive`, mixed short/long, chained after `&&`), plus mkfs/dd/fork bombs/
+  piped remote scripts/sudo/system-path redirection.
+- **Hook injection is defended twice:** interpolated values are `shlex.quote`d into shell
+  commands, and reserved context keys (`$MESSAGE`, `$TOOL_NAME`, …) can't be shadowed by
+  tool arguments.
+- **"Always allow" can't be amplified.** Persisted prefix rules reject shell metacharacters,
+  so approving `echo hi` never whitelists `echo hi; rm -rf ~`.
 
-**Deferred MCP tools.** MCP tools register with `should_defer=True` -- only names are advertised. The LLM discovers full schemas on demand via `ToolSearch`, reducing initial token overhead by ~85% in multi-server scenarios.
+## 🤖 Multi-agent & teams
 
-**Human-in-the-loop via asyncio.Future.** Permission requests suspend the Agent loop with a `Future` that the TUI resolves when the user responds. Cancelling the agent resolves any pending dialog futures (deny/empty answers) and unmounts the widgets, so the input box can never get stuck behind an orphaned prompt.
+```text
+                 ┌────────────┐
+                 │ Coordinator │  filtered toolset: spawn/delegate only
+                 └─────┬──────┘
+        ┌──────────────┼──────────────┐
+   ┌────▼────┐    ┌────▼────┐    ┌────▼────┐
+   │ worker-1 │    │ worker-2 │    │ worker-3 │   worktree-isolated
+   └────┬────┘    └────┬────┘    └────┬────┘
+        └──────────────┴──────────────┘
+             atomic fs mailboxes (.json claim/recovery)
+             structured TaskSpec → WorkerState machine
+```
 
-**Five-tier security.** Each layer (Plan Mode → safe commands → dangerous patterns → sandbox → rules → mode → ask) can independently deny; the first denial short-circuits. Dangerous command detection uses case-insensitive regex patterns covering `rm -rf /` (including long-form `--recursive`/`--force`/`--no-preserve-root` variants), `mkfs`, `dd`, fork bombs, piped scripts, `sudo`, and system-path redirection. Path traversal must resolve strictly inside the project root; macOS `/var` → `/private/var` symlink aliases are handled at resolution time.
+- **Isolation levels:** in-process filtered agents → ephemeral git worktrees → full panes
+  (`tmux`/iTerm2) running real `codeyx` processes with boot parameters.
+- **Mailboxes are crash-safe:** atomic publish, claim-with-recovery semantics, quarantine
+  instead of destruction on malformed messages.
+- **Worktrees are lifecycle-managed:** stale sweeps by naming pattern; dirty worktrees are
+  kept at shutdown with a warning, clean ones removed.
 
-## License
+## ⌨️ Slash commands
 
-MIT
+| Command | Purpose |
+|---|---|
+| `/plan` `/do` | Enter plan mode / return to execution |
+| `/review` | Structured code review pass |
+| `/compact [focus]` | Compress conversation history |
+| `/session list/resume` | Session persistence |
+| `/memory list/catalog/search/clear` | Inspect the memory store |
+| `/skill list/search` | Discover and invoke skills |
+| `/permission` | Switch permission mode |
+| `/status` | Runtime status overview |
+| `/help` | All commands + aliases |
+
+## 📖 Key design decisions
+
+- **AsyncIterator event stream.** `Agent.run()` yields typed `AgentEvent` dataclasses; the
+  agent core and UI are fully decoupled — the same loop drives the TUI, headless prompts,
+  and teammate panes.
+- **ContentReplacementState.** Budget decisions are frozen once and replayed identically,
+  keeping Anthropic prompt-cache prefixes byte-stable between requests.
+- **Deferred MCP tools.** Only names are advertised up front; full schemas arrive on demand
+  via `ToolSearch`.
+- **Human-in-the-loop as dataflow.** Permission prompts suspend the loop on a `Future`; the
+  TUI resolves it. Cancellation resolves every pending dialog deterministically.
+
+## 🗺️ Roadmap
+
+- [ ] Streamed tool-call rendering refinements
+- [ ] Memory aggregate budget controls
+- [ ] Sandbox TOCTOU hardening notes & audit trail
+- [ ] Trajectory evaluation harness GA
+
+See [docs/known-issues.md](docs/known-issues.md) for the live issue ledger.
+
+## 🤝 Contributing
+
+Issues and PRs are welcome. Before opening a PR:
+
+```bash
+uv run pytest                     # all green
+uv run ruff check codeyx tests    # lint clean
+```
+
+Please keep commit messages in English.
+
+## 📄 License
+
+[MIT](LICENSE) © c2h4
