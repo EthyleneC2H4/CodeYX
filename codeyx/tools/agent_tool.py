@@ -272,6 +272,11 @@ class AgentTool(Tool):
                 result_text = await sub_agent.run_to_completion("", conversation)
             else:
                 result_text = await sub_agent.run_to_completion(p.prompt)
+        except asyncio.CancelledError:
+            # Cancellation must keep propagating, but finalize the trace
+            # node here: _prune_finished never evicts a 'running' node.
+            self._trace_manager.complete(trace_node.agent_id, "cancelled")
+            raise
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
             return ToolResult(
@@ -452,14 +457,18 @@ class AgentTool(Tool):
         # 8. Spawn by backend. Failure after this point must roll back the
         # registration and worktree — a phantom active member makes the team
         # permanently undeletable.
+        spawn_thread: asyncio.Task | None = None
         try:
             if backend in (BackendType.TMUX, BackendType.ITERM2):
                 # tmux/osascript subprocess calls block; keep them off the
                 # event loop so streaming UI stays responsive.
-                return await asyncio.to_thread(
-                    self._spawn_pane_teammate,
-                    p, team, member, backend, wt, agent_id, teammate_name,
+                spawn_thread = asyncio.ensure_future(
+                    asyncio.to_thread(
+                        self._spawn_pane_teammate,
+                        p, team, member, backend, wt, agent_id, teammate_name,
+                    )
                 )
+                return await spawn_thread
 
             # In-process: use task_manager only (it handles execution + notification)
             task_id = self._task_manager.launch(
@@ -468,10 +477,39 @@ class AgentTool(Tool):
                 name=teammate_name,
                 fork_conversation=conversation if is_fork else None,
             )
+        except asyncio.CancelledError:
+            # CancelledError is BaseException: without its own branch it
+            # would bypass the rollback below and strand an active member
+            # plus a worktree (the exact defect this rollback exists for).
+            log.warning("Teammate '%s' spawn cancelled; rolling back", teammate_name)
+            # The to_thread worker cannot be cancelled — at cancel time it
+            # may still be mid-tmux/osascript and about to register the pane
+            # id. Wait for it briefly so we roll back against its final
+            # state instead of deleting the worktree out from under it.
+            if spawn_thread is not None and not spawn_thread.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(spawn_thread), timeout=10
+                    )
+                except BaseException:
+                    pass  # failed or timed out; proceed with rollback anyway
+            # If the thread did create the pane, kill it BEFORE removing
+            # the worktree beneath it — otherwise delete_team never sees
+            # this agent (member already rolled back) and the pane leaks.
+            self._team_manager.kill_pane_for_agent(agent_id, member.backend_type)
+            self._team_manager.remove_member(p.team_name, member)
+            AgentNameRegistry.instance().unregister(teammate_name)
+            await self._worktree_cleanup_quietly(wt_name, wt.head_commit)
+            self._trace_manager.complete(trace_node.agent_id, "cancelled")
+            raise
         except Exception as e:
             log.warning("Teammate '%s' spawn failed: %s", teammate_name, e)
             self._team_manager.remove_member(p.team_name, member)
+            AgentNameRegistry.instance().unregister(teammate_name)
             await self._worktree_cleanup_quietly(wt_name, wt.head_commit)
+            # Finalize the trace node or it stays 'running' forever —
+            # _prune_finished never evicts running nodes.
+            self._trace_manager.complete(trace_node.agent_id, "failed")
             return ToolResult(
                 output=(
                     f"Failed to spawn teammate '{teammate_name}': {e}. "

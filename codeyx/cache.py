@@ -46,8 +46,18 @@ class FileCache:
             # Unstatable at write time: cache with a sentinel that can never
             # match a future stat, i.e. effectively uncached.
             meta = (-1, -1)
+        self.put_with_meta(path, content, *meta)
+
+    def put_with_meta(self, path: str, content: str, mtime_ns: int, size: int) -> None:
+        """Store content with caller-captured metadata.
+
+        Callers that read the file themselves must stat BEFORE reading and
+        pass that snapshot here — statting after the read lets a concurrent
+        external write pair old content with new metadata, which get_fresh()
+        would then serve as fresh indefinitely.
+        """
         with self._lock:
-            self._store[path] = (content, meta[0], meta[1])
+            self._store[path] = (content, mtime_ns, size)
 
     def invalidate(self, path: str) -> None:
         with self._lock:

@@ -176,6 +176,16 @@ class TeamManager:
     def get_pane_id(self, agent_id: str) -> str | None:
         return self._pane_ids.get(agent_id)
 
+    def kill_pane_for_agent(self, agent_id: str, backend_type: str) -> bool:
+        """Best-effort pane teardown by agent id, used by spawn-cancel
+        rollback: the member entry is about to disappear, so delete_team's
+        member-driven pane cleanup will never see this pane again."""
+        pane_id = self._pane_ids.get(agent_id)
+        if not pane_id:
+            return False
+        self._kill_pane(pane_id, backend_type)
+        return True
+
     def delete_team(self, team_name: str) -> None:
         team = self.get_team(team_name)
         if team is None:
@@ -258,6 +268,10 @@ class TeamManager:
             result = subprocess.run(
                 ["git", "worktree", "remove", worktree_path],
                 capture_output=True, timeout=10,
+                # Run git INSIDE the worktree: without a cwd it resolves the
+                # repo from the process CWD, so cleanup silently no-ops
+                # whenever the host was launched outside the main repo.
+                cwd=worktree_path,
             )
             if result.returncode != 0:
                 detail = (result.stderr or "").decode(errors="replace").strip()

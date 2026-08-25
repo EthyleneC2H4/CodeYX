@@ -44,9 +44,15 @@ class ReadFile(Tool):
             # …) that never call invalidate() still show up on the next read.
             text = self._cache.get_fresh(resolved) if self._cache else None
             if text is None:
+                # Stat BEFORE reading: pairing the content with a post-read
+                # stat would let a concurrent external write poison the
+                # freshness check (old content, new mtime → fresh forever).
+                st = path.stat()
                 text = path.read_text(encoding="utf-8")
                 if self._cache:
-                    self._cache.put(resolved, text)
+                    self._cache.put_with_meta(
+                        resolved, text, st.st_mtime_ns, st.st_size
+                    )
         except Exception as e:
             return ToolResult(output=f"Error reading file: {e}", is_error=True)
 

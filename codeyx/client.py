@@ -259,12 +259,15 @@ class AnthropicClient(LLMClient):
                         if current_tool_name:
                             try:
                                 args = json.loads(json_accum) if json_accum else {}
+                                parse_error = False
                             except json.JSONDecodeError:
                                 args = {}
+                                parse_error = True
                             yield ToolCallComplete(
                                 tool_id=current_tool_id,
                                 tool_name=current_tool_name,
                                 arguments=args,
+                                parse_error=parse_error,
                             )
                             current_tool_name = ""
                             current_tool_id = ""
@@ -357,12 +360,15 @@ class OpenAIClient(LLMClient):
                         current_call_id = getattr(event, "call_id", "") or ""
                     try:
                         args = json.loads(json_accum) if json_accum else {}
+                        parse_error = False
                     except json.JSONDecodeError:
                         args = {}
+                        parse_error = True
                     yield ToolCallComplete(
                         tool_id=current_call_id,
                         tool_name=current_tool_name,
                         arguments=args,
+                        parse_error=parse_error,
                     )
                     current_tool_name = ""
                     current_call_id = ""
@@ -380,13 +386,39 @@ class OpenAIClient(LLMClient):
                 elif event.type == "response.completed":
                     resp = getattr(event, "response", None)
                     usage = getattr(resp, "usage", None) if resp else None
-                    # status=="incomplete" means output was truncated; map
-                    # the reason so the agent's max_tokens recovery fires.
+                    # Defensive: a truncated response should arrive via the
+                    # distinct `response.incomplete` event below, but keep
+                    # mapping a completed-status=="incomplete" shape too.
                     stop = "end_turn"
                     if getattr(resp, "status", "") == "incomplete":
                         details = getattr(resp, "incomplete_details", None)
                         reason = getattr(details, "reason", "") if details else ""
                         stop = "max_tokens" if reason == "max_output_tokens" else "incomplete"
+                    yield StreamEnd(
+                        stop_reason=stop,
+                        input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                        output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                    )
+                    responses_ended = True
+                elif event.type in ("response.incomplete", "response.failed"):
+                    # Real terminal events for truncation/failure — NOT
+                    # `response.completed`. Missing these meant truncation
+                    # was never detected on this protocol: no max_tokens
+                    # recovery, dropped usage, and a silently-vanished
+                    # partial tool call.
+                    resp = getattr(event, "response", None)
+                    usage = getattr(resp, "usage", None) if resp else None
+                    stop = "end_turn"
+                    if event.type == "response.incomplete":
+                        details = getattr(resp, "incomplete_details", None)
+                        reason = getattr(details, "reason", "") if details else ""
+                        stop = (
+                            "max_tokens"
+                            if reason == "max_output_tokens"
+                            else "incomplete"
+                        )
+                    else:
+                        stop = "response_failed"
                     yield StreamEnd(
                         stop_reason=stop,
                         input_tokens=getattr(usage, "input_tokens", 0) or 0,
@@ -524,14 +556,39 @@ class OpenAICompatClient(LLMClient):
                         for _idx, call in sorted(active_calls.items()):
                             try:
                                 args = json.loads(call["args"]) if call["args"] else {}
+                                parse_error = False
                             except json.JSONDecodeError:
                                 args = {}
+                                parse_error = True
                             yield ToolCallComplete(
                                 tool_id=call["id"],
                                 tool_name=call["name"],
                                 arguments=args,
+                                parse_error=parse_error,
                             )
                         active_calls.clear()
+                elif choice.finish_reason and choice.finish_reason != "stop":
+                    # Unknown terminal reason (content_filter, …): pass it
+                    # through verbatim instead of masquerading as end_turn.
+                    final_stop = choice.finish_reason
+
+                # Some providers fold usage into the final choice-bearing
+                # chunk instead of sending a usage-only one afterwards; the
+                # stream_ended guard keeps this idempotent with both that
+                # path and the synthesis fallback below. Gated on a terminal
+                # finish reason: gateways that report running/cumulative
+                # usage on EVERY chunk must not end the stream at chunk 1.
+                if (
+                    getattr(chunk, "usage", None)
+                    and not stream_ended
+                    and choice.finish_reason is not None
+                ):
+                    yield StreamEnd(
+                        stop_reason=final_stop,
+                        input_tokens=chunk.usage.prompt_tokens or 0,
+                        output_tokens=chunk.usage.completion_tokens or 0,
+                    )
+                    stream_ended = True
 
             if not stream_ended:
                 # Provider never sent a usage-only terminal chunk (ignores
@@ -690,14 +747,39 @@ class DeepSeekClient(LLMClient):
                         for _idx, call in sorted(active_calls.items()):
                             try:
                                 args = json.loads(call["args"]) if call["args"] else {}
+                                parse_error = False
                             except json.JSONDecodeError:
                                 args = {}
+                                parse_error = True
                             yield ToolCallComplete(
                                 tool_id=call["id"],
                                 tool_name=call["name"],
                                 arguments=args,
+                                parse_error=parse_error,
                             )
                         active_calls.clear()
+                elif choice.finish_reason and choice.finish_reason != "stop":
+                    # Unknown terminal reason (content_filter, …): pass it
+                    # through verbatim instead of masquerading as end_turn.
+                    final_stop = choice.finish_reason
+
+                # Some providers fold usage into the final choice-bearing
+                # chunk instead of sending a usage-only one afterwards; the
+                # stream_ended guard keeps this idempotent with both that
+                # path and the synthesis fallback below. Gated on a terminal
+                # finish reason: gateways that report running/cumulative
+                # usage on EVERY chunk must not end the stream at chunk 1.
+                if (
+                    getattr(chunk, "usage", None)
+                    and not stream_ended
+                    and choice.finish_reason is not None
+                ):
+                    yield StreamEnd(
+                        stop_reason=final_stop,
+                        input_tokens=chunk.usage.prompt_tokens or 0,
+                        output_tokens=chunk.usage.completion_tokens or 0,
+                    )
+                    stream_ended = True
 
             if not stream_ended:
                 yield StreamEnd(stop_reason=final_stop)

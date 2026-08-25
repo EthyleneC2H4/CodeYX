@@ -39,9 +39,9 @@ class TestPersistToolResult:
         assert fp.read_text() == "hello world"
 
     def test_idempotent(self, tmp_path: Path) -> None:
-        persist_tool_result("toolu_002", "first", tmp_path)
-        persist_tool_result("toolu_002", "second", tmp_path)
-        fp = tmp_path / "toolu_002.txt"
+        fp = persist_tool_result("toolu_002", "first", tmp_path)
+        fp2 = persist_tool_result("toolu_002", "second", tmp_path)
+        assert fp2 == fp
         assert fp.read_text() == "first"
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,8 @@ class TestApplyToolResultBudget:
 
         tr = api_conv.history[0].tool_results[0]
         assert tr.content.startswith(PERSISTED_TAG)
-        assert (tmp_path / "toolu_big.txt").exists()
+        persisted = list(tmp_path.glob("toolu_big-*.txt"))
+        assert len(persisted) == 1
         assert conv.history[0].tool_results[0].content == big_content  # original untouched
         assert len(records) == 1 and records[0].tool_use_id == "toolu_big"
 

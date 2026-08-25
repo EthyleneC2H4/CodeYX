@@ -174,6 +174,15 @@ class ConversationManager:
         return result
 
     def _serialize_openai(self) -> list[dict[str, Any]]:
+        """Serialize for the OpenAI Responses API format.
+
+        - Text: plain role/content messages.
+        - Tool calls become `function_call` items keyed by call_id; results
+          become matching `function_call_output` items.
+        - Thinking blocks are skipped (no wire representation).
+        - `is_error` on tool results has no wire representation here — the
+          error text itself is preserved, only the flag is lost.
+        """
         result: list[dict[str, Any]] = []
         for m in self.history:
             if m.tool_uses:

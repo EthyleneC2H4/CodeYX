@@ -19,6 +19,12 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "Workflow",
 })
 
+# Enter/ExitWorktree re-root the WHOLE host session (process chdir, host
+# agent.work_dir, sandbox rebinding). A sub-agent invoking them would move
+# the user's live session into a worktree it never chose — so they are
+# stripped from every derived toolset, including whitelists below.
+SESSION_ROOT_TOOLS: frozenset[str] = frozenset({"EnterWorktree", "ExitWorktree"})
+
 # Kept as a distinct name for readability at call sites, but currently
 # identical to the global set; custom agents may diverge later.
 CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = ALL_AGENT_DISALLOWED_TOOLS
@@ -38,8 +44,6 @@ ASYNC_AGENT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "LoadSkill",
     "SyntheticOutput",
     "ToolSearch",
-    "EnterWorktree",
-    "ExitWorktree",
 })
 
 TEAMMATE_COORDINATION_TOOLS: frozenset[str] = frozenset({
@@ -87,8 +91,8 @@ def resolve_agent_tools(
         for name in definition.disallowed_tools:
             mcp_tools.pop(name, None)
 
-    # Layer 1: global disallowed
-    for name in ALL_AGENT_DISALLOWED_TOOLS:
+    # Layer 1: global disallowed + host-only session-root tools.
+    for name in ALL_AGENT_DISALLOWED_TOOLS | SESSION_ROOT_TOOLS:
         all_tools.pop(name, None)
 
     # Layer 2: custom agent extra restrictions
@@ -152,6 +156,10 @@ def build_teammate_tools(
         filtered = {t.name: t for t in parent_registry.list_tools()}
         filtered.pop("TeamCreate", None)
         filtered.pop("TeamDelete", None)
+
+    # Session-wide re-rooting belongs to the host only (see SESSION_ROOT_TOOLS).
+    for name in SESSION_ROOT_TOOLS:
+        filtered.pop(name, None)
 
     # Apply agent definition restrictions
     if definition is not None:

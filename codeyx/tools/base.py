@@ -90,6 +90,10 @@ class ToolCallComplete:
     tool_id: str
     tool_name: str
     arguments: dict[str, Any]
+    # True when the provider's argument JSON failed to parse and
+    # `arguments` was coerced to {}. Such calls must never be executed —
+    # agents quarantine them like id-less calls instead.
+    parse_error: bool = False
 
 
 @dataclass

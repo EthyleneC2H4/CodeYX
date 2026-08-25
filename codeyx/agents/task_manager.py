@@ -168,7 +168,9 @@ class TaskManager:
         return False
 
     def poll_completed(self) -> list[BackgroundTask]:
-        self.reap()
+        # Drain notifications BEFORE reaping: a completion that waited out
+        # its own retention window (the poller pauses while a turn streams)
+        # must still be delivered — reaping first would silently drop it.
         completed: list[BackgroundTask] = []
         while not self._notify_queue.empty():
             try:
@@ -178,6 +180,7 @@ class TaskManager:
                     completed.append(bg)
             except asyncio.QueueEmpty:
                 break
+        self.reap()
         return completed
 
     def reap(self, now: float | None = None) -> int:

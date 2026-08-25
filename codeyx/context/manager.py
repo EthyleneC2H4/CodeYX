@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -181,8 +182,12 @@ def cleanup_tool_results(session_dir: Path) -> None:
 
 def persist_tool_result(tool_use_id: str, content: str, session_dir: Path) -> Path:
     # tool_use_id comes from the model; never let it steer the filesystem.
-    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", tool_use_id) or "unnamed"
-    file_path = session_dir / f"{safe_id}.txt"
+    # The sanitized prefix keeps names readable; the digest over the RAW id
+    # bounds the length (NAME_MAX) and makes distinct ids map to distinct
+    # files even after sanitization collides them ("a/b" vs "a.b").
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", tool_use_id)[:80] or "unnamed"
+    digest = hashlib.sha256(tool_use_id.encode("utf-8")).hexdigest()[:12]
+    file_path = session_dir / f"{safe_id}-{digest}.txt"
     try:
         fd = os.open(str(file_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -425,6 +430,13 @@ def looks_like_context_overflow(err_msg: str) -> bool:
     if "prompt is too long" in m or "context_length_exceeded" in m:
         return True
     if "context length" in m or "maximum context" in m:
+        return True
+    # OpenAI-compat families: Gemini-style endpoints, llama.cpp, Bedrock.
+    if "input token count" in m and "exceed" in m:
+        return True
+    if "exceed" in m and "context window" in m:
+        return True
+    if "input is too long" in m:
         return True
     return ("prompt" in m and "long" in m) or ("too many" in m and "token" in m)
 
@@ -796,6 +808,11 @@ async def auto_compact(
     new_messages = build_compact_messages(summary, attachment=attachment)
 
     conversation.replace_history(new_messages)
+    # The pre-compact token reading no longer describes this history.
+    # Keeping it would make the NEXT auto-compact check fire immediately
+    # after a manual /compact and re-summarize the fresh summary. Zero is
+    # safe: the next real API response overwrites it with an actual count.
+    conversation.last_input_tokens = 0
     cleanup_tool_results(session_dir)
 
     if breaker is not None:

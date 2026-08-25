@@ -501,11 +501,90 @@ tests/test-summary.md
 
 ---
 
-## 3. 优先修复顺序
+### ISSUE-009：会话恢复后 replacement_state 不回放持久化记录
 
-截至 2026-08-25，ISSUE-001 至 ISSUE-008 全部修复或解决，当前无待处理问题。后续新增问题按本节顺序规则追加。
+状态：已知限制（2026-08-25 终审 round 2 记录，暂缓）
+严重级别：P3（低概率、影响为重复压缩而非数据丢失）
+类型：架构缺口
+影响范围：`codeyx/agent.py`, `codeyx/context/manager.py`, `codeyx/memory/session.py`
+
+说明：
+
+- Agent 在运行中会把被替换的大工具结果写入 replacement records（`append_replacement_records`），
+  但每次构造 Agent 时 `create_replacement_state()` 从空状态开始。
+- `/session resume` 后，历史 JSONL 里已有的替换记录不会回放进新状态。
+- 后果：恢复后的会话若再次触发预算压缩，可能对同一批结果做二次替换决策；
+  不会崩溃，也不会丢用户数据，只是压缩决策可能非最优。
+- 暂缓原因：正确修法需要决定「replacement 记录的权威来源」（磁盘 vs 内存状态）并统一
+  resume 路径的状态构建，属于跨模块重构；当前行为安全但次优。
+
+建议修复：
+
+- 在 `records_to_messages()` 或 resume 接线处同时回放 replacement records 到
+  `ContentReplacementState`；补一条「resume 后 budget apply 不重复替换」的回归测试。
 
 ---
+
+### ISSUE-010：SessionRecord 的 SYSTEM_PROMPT / COMPRESSION 类型无写入方
+
+状态：既有问题（2026-08-25 终审 round 2 记录）
+严重级别：P4
+类型：死代码 / 防御性读取
+影响范围：`codeyx/memory/session.py`
+
+说明：
+
+- `RecordType.SYSTEM_PROMPT` 与 `RecordType.COMPRESSION` 有完整读取分支
+  （跳过 / 渲染为 `[摘要]`），但代码库中没有任何写入方。
+- 当前 compact 摘要走的是 ConversationManager.replace_history + 单独摘要文件，
+  不经 SessionRecord。两个类型是为未来「把摘要写进会话流」预留的。
+- 风险：读者会误以为存在摘要落盘路径。保留无害（防御未来格式），但应在真正接入
+  写入方或彻底移除二者之间二选一。
+
+---
+
+### ISSUE-011：SharedTaskStore 的 fcntl.flock 在事件循环线程内阻塞
+
+状态：已知限制（2026-08-25 终审 round 2 记录，暂缓）
+严重级别：P4
+类型：性能 / 事件循环阻塞窗口
+影响范围：`codeyx/teams/shared_task.py`
+
+说明：
+
+- `_locked_save()` 用 `fcntl.flock(LOCK_EX)` 同步加锁，锁竞争时会在事件循环线程内阻塞，
+  最坏情况卡住 UI 一小段时间。
+- 实际影响很小：tasks.json 只在 teammate 任务增删改时写，文件小、持锁时间毫秒级，
+  且跨进程写方只有本项目的 teammate。
+- 暂缓原因：改 `asyncio.to_thread` 会引入「同一线程池内锁顺序」新问题，收益不匹配风险；
+  若未来出现高频共享任务写入再迁移。
+
+---
+
+### ISSUE-012：连续 system-reminder 合并渲染的边界样式问题
+
+状态：既有问题（2026-08-25 终审 round 2 记录）
+严重级别：P4
+类型：外观 / 序列化细节
+影响范围：`codeyx/conversation.py`
+
+说明：
+
+- `_serialize_anthropic` 会把相邻 user 消息中的 `<system-reminder>` 合并进前一条 user 内容；
+  当 reminder 与真实用户输入交错时，合并顺序在极端序列下可能与插入顺序有细微出入。
+- 对 API 语义无影响（Anthropic 接受多 text block），仅影响重放可读性。
+
+---
+
+## 3. 优先修复顺序
+
+截至 2026-08-25，ISSUE-001 至 ISSUE-008 全部修复或解决；ISSUE-009 至 ISSUE-012 为终审
+round 2 记录的已知限制 / 低危遗留（P3-P4），均不影响正确性与数据安全，按序暂缓。
+后续新增问题按本节顺序规则追加。
+
+---
+
+
 
 ## 4. 更新记录
 
@@ -596,6 +675,65 @@ tests/test-summary.md
 5. （低中）AskUserQuestion 300s 超时后对话框残留、输入框持续禁用 → 新增 `on_expired` 回调，超时即卸载对话框并恢复输入。
 6. （低中）hook 模板中工具参数键可遮蔽保留上下文键（`$MESSAGE` 等）→ 保留键始终优先，杜绝内容伪造注入 prompt/HTTP。
 7. （低）规则缓存同 tick 同长度编辑可能读到陈旧层 → 缓存加 5s TTL 兜底；另将既有 ALLOW_ALWAYS 前缀规则加固为不含 shell 元字符才持久化（`Bash(echo hi*)` 不再放大到 `echo hi; <任意>`）。
+
+### 2026-08-25 发布前终审（两轮对抗式复查 + 一轮验证复查）
+
+三波修复全部落地后，以全新视角对累计 diff（1b9c2b6..HEAD）做两轮多代理对抗式终审，
+再对终审修复本身做一轮对抗式验证（13 个代理：5 维度复审 + 逐条反驳），三批共确认并
+修复约 42 项缺陷，全部带回归测试（`tests/test_final_review_fixes.py` 26 项、
+`tests/test_round2_fixes.py` 39 项）。要点：
+
+**Round 1（14 项）**
+- gitignore 引擎重写：chunk 级 `**` 展开 + 祖先优先 last-match-wins，`**/x` 可匹配根、
+  尾段取反不再被祖先短路吞掉；前台子代理工具过滤补齐 SESSION_ROOT_TOOLS 剥离。
+- 回合互斥锁：`_try_claim_turn` 原子认领 + `_streaming` 移交；被中断的旧任务 finally
+  只在自己仍持有回合时才释放标志（ownership guard）。
+- Ctrl+Q 关机先取消并 join 存活 agent 回合，再走记忆提取 / 会话关闭 / to_thread 清理。
+- CompactNotification 重置 `history_cursor = len(history)`，resume 不再产生空切片 /
+  孤儿 tool_result。
+- run_to_completion 与主循环同样传 thinking_blocks（extended-thinking 重放不变式）；
+  CancelledError（BaseException）显式分支：trace 标记 cancelled 并 re-raise、spawn 失败
+  完整回滚（成员注销 + 名字注册表注销 + worktree 清理）。
+- poll_completed 先排空通知队列再 reap，保留窗口外的完成通知不再被销毁。
+- ExitWorktree 先恢复宿主根目录再删除 worktree，恢复失败时拒绝删除并提示重试；
+  `/worktree exit` 处理器镜像同序。
+- SharedTaskStore 文件被外部删除后镜像磁盘（不复活旧任务）；`git worktree remove`
+  以 cwd=worktree_path 执行，进程 CWD 无关。
+
+**Round 2（并发 / 协议维度新增确认项）**
+- 协议层：OpenAI Responses 真实终止事件 `response.incomplete`（区分 max_output_tokens）
+  与 `response.failed` 落到 StreamEnd，截断可检测；三协议所有 JSONDecodeError 打上
+  `ToolCallComplete.parse_error`，坏参数调用与无 id 调用同等隔离（永不执行）；compat/deepseek
+  未知 finish_reason 原样透传（content_filter 不再伪装 end_turn）。
+- 安全层：裸 `&` 进入 Layer-1 白名单拒绝与 rm-detector 分段（`cat x & rm -rf ~` 拦截）。
+- Agent 核心：run_to_completion 按 tool_id/parse_error 分桶隔离坏调用；max_tokens 中途
+  截断的 tool call 一律不执行并返回 `[Truncated ...]` 说明；升级且耗尽后的最终 else 分支
+  显式报错退出而非执行截断参数。
+- 上下文：auto_compact 后 `last_input_tokens = 0`，消除紧随其后的二次自动压缩。
+- 沙箱：含 NUL 的路径 check 直接拒绝（文件名与缺失祖先两条路径），不再异常炸回合。
+
+**验证复查轮（对终审修复本身的对抗验证，8 项确认全部修复）**
+- （高）gitignore 重写回归：尾部 `**`（如 `build/**`）编译出的正则要求路径以 `/`
+  结尾导致永不匹配——最常用 ignore 写法整体失效；裸 `**` 同样失灵。已改为
+  「前缀 + 非空剩余」语义，并实测恢复。
+- （中）同重写的字符类 `[...]` 被当字面量，`*.py[cod]` 等 GitHub 模板惯用法失效；
+  已按 fnmatch 语义恢复类支持（含 `[!...]` 取反、未闭合 `[` 保持字面量）。
+- （中×2）compat/deepseek 的「usage 折叠进 choice chunk」StreamEnd 未限定终止 chunk，
+  网关逐 chunk 上报累计 usage 时会在第 1 个 chunk 就提前结束流、掩盖真实截断原因；
+  已加 finish_reason 终结门。
+- （中）run_to_completion 中 `not good_calls` 分支先于 max_tokens 门，全被隔离的截断
+  响应反而拿不到 `[Truncated ...]` 标注；已将 max_tokens 门提前到分桶之前。
+- （中）spawn 取消回滚会与不可取消的 to_thread pane 生成线程赛跑（删 worktree /
+  迟到的 register_pane_id 造成孤儿 pane）；现在先有界等待线程收尾、kill 掉已建
+  pane，再回滚注册与 worktree（TeamManager 新增公开 `kill_pane_for_agent`）。
+- （中）/worktree exit --remove 在 restore_root 之后才可能被脏树拒绝，会话被留在
+  主仓但状态仍是 worktree 内；已镜像工具路径的脏树预检，拒绝发生在任何状态变更前。
+- （低）/worktree create 绕过单活会话守卫可顶掉现有会话；已补同款守卫。
+
+- 暂缓项记录为 ISSUE-009 ~ ISSUE-012（见清单）。
+
+验证：`uv run pytest tests/ -q -m 'not integration'` 双 Python（3.11 / 3.12）各 **810 passed**；
+`uv run ruff check codeyx tests` 全绿；123 个模块全量导入无错。
 
 ### 2026-06-17
 

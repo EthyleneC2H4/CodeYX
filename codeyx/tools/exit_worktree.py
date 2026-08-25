@@ -102,22 +102,37 @@ class ExitWorktreeTool(Tool):
         original_cwd = session.original_cwd
         wt_name = session.worktree_name
 
+        restore_error = ""
+        if self._on_exit is not None:
+            try:
+                # Restore the host root BEFORE touching the worktree: if
+                # the switch-back fails while action=remove, deleting the
+                # worktree would leave the session stranded inside a
+                # directory that no longer exists — unrecoverable. Keeping
+                # it lets the user fix the cause and simply retry.
+                await self._on_exit(session)
+            except Exception as e:
+                if action == "remove":
+                    return ToolResult(
+                        output=(
+                            f"Cannot remove the worktree: switching the "
+                            f"session back to {original_cwd} failed ({e}). "
+                            f"The worktree is kept at {worktree_path}; "
+                            "resolve the cause and retry."
+                        ),
+                        is_error=True,
+                    )
+                restore_error = (
+                    f" WARNING: the session could not be switched back to "
+                    f"{original_cwd} ({e})."
+                )
+
         try:
             await self._manager.exit(wt_name, action=action, discard_changes=discard)
         except Exception as e:
             return ToolResult(
                 output=f"Error exiting worktree: {e}", is_error=True
             )
-
-        restore_error = ""
-        if self._on_exit is not None:
-            try:
-                await self._on_exit(session)
-            except Exception as e:
-                restore_error = (
-                    f" WARNING: the session could not be switched back to "
-                    f"{original_cwd} ({e})."
-                )
 
         if action == "keep":
             return ToolResult(

@@ -6,6 +6,7 @@ import os
 import random
 import re
 import time as _time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -739,7 +740,11 @@ class CodeYXApp(App):
         if restored:
             self._switch_session_root(restored.worktree_path)
 
-        wt_command = create_worktree_command(self.worktree_manager)
+        wt_command = create_worktree_command(
+            self.worktree_manager,
+            apply_root=self._apply_worktree_root,
+            restore_root=self._restore_worktree_root,
+        )
         self.command_registry.register_sync(wt_command)
 
         from codeyx.tools.enter_worktree import EnterWorktreeTool
@@ -886,7 +891,12 @@ class CodeYXApp(App):
             self._boot_prompt_task = asyncio.create_task(
                 self._send_message(boot_prompt)
             )
+            # Register with the interrupt paths immediately, not just when
+            # the coroutine first runs — and arm the claim-latch watcher so
+            # a pre-run cancel cannot strand the turn mutex.
+            self._agent_task = self._boot_prompt_task
             self._boot_prompt_task.add_done_callback(_log_task_exception)
+            self._watch_turn_task(self._boot_prompt_task)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "provider-list":
@@ -928,6 +938,7 @@ class CodeYXApp(App):
             self.add_system_message("正在生成回复，命令暂不执行：请等当前回复结束后重试。")
             return
         self._agent_task = asyncio.create_task(self._send_message(text))
+        self._watch_turn_task(self._agent_task)
 
     def set_plan_mode(self, enabled: bool) -> None:
         if self.agent is None:
@@ -990,6 +1001,7 @@ class CodeYXApp(App):
             if self.agent is None or not self._try_claim_turn():
                 return
             self._agent_task = asyncio.create_task(self._send_message(text))
+            self._watch_turn_task(self._agent_task)
             return
 
         if name == "":
@@ -1160,9 +1172,23 @@ class CodeYXApp(App):
         self._turn_starting = True
         return True
 
+    def _watch_turn_task(self, task: asyncio.Task) -> None:
+        """Release a claim whose task was cancelled before its first step.
+
+        Such a task never reaches _send_message, where the claim latch is
+        handed off to `_streaming` — without this, one dead claim would
+        lock out every future turn. The ownership check keeps an older
+        task cancelled mid-run from releasing a NEWER turn's claim."""
+        def _release_if_unstarted(t: asyncio.Task) -> None:
+            if t.cancelled() and self._turn_starting and self._agent_task is t:
+                self._turn_starting = False
+
+        task.add_done_callback(_release_if_unstarted)
+
     async def _send_message_inner(
         self, text: str, is_notification: bool = False
     ) -> None:
+        current = asyncio.current_task()
         if self._mcp_init_task and not self._mcp_init_task.done():
             self._show_system_message("Waiting for MCP servers to connect...")
             await self._mcp_init_task
@@ -1321,6 +1347,14 @@ class CodeYXApp(App):
 
                 elif isinstance(event, CompactNotification):
                     self._show_system_message(event.message)
+                    # Compaction replaced the whole history, so the stale
+                    # persistence cursor now points past its start: every
+                    # slice would be empty until history regrows (summary
+                    # and later turns never reach JSONL) and a regrown
+                    # history can emit a half-turn — a tool_result whose
+                    # tool_use record predates the cursor — which breaks
+                    # session resume with an API 400.
+                    history_cursor = len(self.conversation.history)
 
                 elif isinstance(event, ErrorEvent):
                     self._show_error(event.message)
@@ -1375,12 +1409,19 @@ class CodeYXApp(App):
         except LLMError as e:
             self._show_error(str(e))
         finally:
-            self._streaming = False
-            self._agent_task = None
-            self._stop_spinner()
-            input_widget.focus()
+            # Release the turn only if THIS task still owns it: a stale
+            # interrupted turn's epilogue (widget mounts, markdown render)
+            # can straddle the next turn's start — interrupt-and-resend
+            # waits just 50ms — and clearing the live turn's flags here
+            # would let a duplicate agent loop start. Same ownership rule
+            # as _send_message's finally.
+            if current is None or self._agent_task is current:
+                self._streaming = False
+                self._agent_task = None
+                self._stop_spinner()
+                input_widget.focus()
 
-            await self._process_task_notifications()
+                await self._process_task_notifications()
 
     async def _process_task_notifications(self) -> None:
         completed = self.task_manager.poll_completed()
@@ -1406,6 +1447,7 @@ class CodeYXApp(App):
         self._agent_task = asyncio.create_task(
             self._send_message("", is_notification=True)
         )
+        self._watch_turn_task(self._agent_task)
 
     async def _start_notification_polling(self) -> None:
         try:
@@ -1756,6 +1798,18 @@ class CodeYXApp(App):
             bg = getattr(self, attr, None)
             if bg is not None and not bg.done():
                 bg.cancel()
+
+        # Ctrl+Q can arrive mid-stream. Cancel the live agent turn and let
+        # it unwind BEFORE the teardown below: memory extraction, session
+        # close, delete_team and worktree removal mutate (now partly from
+        # worker threads) the same objects the running loop is writing.
+        agent_task = getattr(self, "_agent_task", None)
+        if agent_task is not None and not agent_task.done():
+            self._dismiss_pending_dialogs()
+            agent_task.cancel()
+            with suppress(BaseException):
+                await asyncio.wait_for(agent_task, timeout=5.0)
+            self._streaming = False
 
         if self.agent and self.agent.memory_manager:
             # A periodic extraction may still be in flight; awaiting it first

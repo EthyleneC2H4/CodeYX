@@ -34,15 +34,17 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # (find -delete/-exec, xargs, sed -i, awk system(), tee, npx, env <cmd>, …)
 # must NOT be listed here — those fall through to the mode matrix / user
 # confirmation. `env` was removed: prefix matching let "env rm -rf /" hit it.
+# sort/uniq were removed: `-o` / second operand write arbitrary files.
+# git branch/tag/remote were removed: they mutate refs, not just read them.
 _SAFE_COMMANDS = frozenset({
     "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc",
     "which", "whereis", "whoami", "hostname", "uname",
     "date", "cal", "uptime", "df", "du", "free", "printenv",
     "file", "stat", "readlink", "realpath", "basename", "dirname",
-    "sort", "uniq", "tr", "cut", "grep", "egrep", "fgrep",
+    "tr", "cut", "grep", "egrep", "fgrep",
     "diff", "comm", "true", "false", "test",
-    "git status", "git log", "git diff", "git show", "git branch",
-    "git tag", "git remote", "git rev-parse", "git ls-files",
+    "git status", "git log", "git diff", "git show",
+    "git rev-parse", "git ls-files",
     "git blame", "git stash list", "go version", "go env",
     "node -v", "npm -v", "python --version", "pip list",
     "cargo --version", "rustc --version", "java -version", "java --version",
@@ -76,7 +78,7 @@ def _extract_wrapped_payload(command: str) -> str | None:
     return None
 
 
-_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||\r?\n")
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||\r?\n|&")
 
 
 def _detect_rm_variants(command: str) -> str:
@@ -150,7 +152,9 @@ def is_safe_command(command: str) -> bool:
         return False
     # "<(" / "=(" are bash/zsh process substitution: the inner command runs
     # at full privilege, so "cat <(rm -rf /)" must not prefix-match "cat".
-    for ch in ("|", ";", "&&", ">", "$(", "`", "<(", "=("):
+    # A bare "&" is a separator too: "cat README & <payload>" backgrounds
+    # the payload at full privilege.
+    for ch in ("|", ";", "&&", ">", "$(", "`", "<(", "=(", "&"):
         if ch in trimmed:
             return False
     for safe in _SAFE_COMMANDS:

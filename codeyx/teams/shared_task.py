@@ -63,27 +63,38 @@ class SharedTaskStore:
 
     def _load(self) -> None:
         if not self._path.exists():
+            # The store was removed underneath us (external rm). Mirror the
+            # disk: keeping the old tasks here would resurrect them into
+            # the shared file on this instance's next save.
+            self._tasks = {}
+            self._next_id = 1
             return
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+            # Structural damage (right JSON, wrong shape) must land in the
+            # same quarantine as unparseable bytes, or every later operation
+            # keeps crashing exactly as before the tolerant-load fix.
+            if not isinstance(data, dict):
+                raise TypeError("task store root is not an object")
+            self._next_id = int(data.get("next_id", 1))
+            tasks = {}
+            for t in data.get("tasks", []):
+                task = SharedTask.from_dict(t)
+                tasks[task.id] = task
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, KeyError):
             # _save writes atomically, so a torn file is impossible; reaching
             # here means external damage. Keep the bytes for inspection
             # instead of crashing every later operation.
             backup = self._path.parent / (self._path.name + ".corrupt")
             try:
                 os.replace(self._path, backup)
-                log.warning("SharedTaskStore file unreadable; preserved at %s", backup)
+                log.warning("SharedTaskStore file damaged; preserved at %s", backup)
             except OSError:
-                log.warning("SharedTaskStore file unreadable and could not be backed up")
+                log.warning("SharedTaskStore file damaged and could not be backed up")
             self._next_id = 1
             self._tasks = {}
             return
-        self._next_id = data.get("next_id", 1)
-        self._tasks = {}
-        for t in data.get("tasks", []):
-            task = SharedTask.from_dict(t)
-            self._tasks[task.id] = task
+        self._tasks = tasks
 
     def _save(self) -> None:
         data = {

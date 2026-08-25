@@ -335,7 +335,9 @@ class TestTeamLifecycle:
         # The whole point: delete_team must work again after rollback.
         mgr.delete_team(team.name)
 
-    def test_cleanup_worktree_preserves_dirty_tree(self, isolated_home, tmp_path):
+    def test_cleanup_worktree_preserves_dirty_tree(
+        self, isolated_home, tmp_path, monkeypatch
+    ):
         import subprocess
 
         from codeyx.teams.manager import TeamManager
@@ -357,11 +359,52 @@ class TestTeamLifecycle:
         )
         (wt / "uncommitted.txt").write_text("precious work")
 
+        # Cleanup must discover the repo from the worktree path itself, not
+        # the ambient process cwd — run it from a non-git directory.
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+
         mgr = TeamManager()
         mgr._cleanup_worktree(str(wt))
 
         assert wt.exists(), "--force removal destroyed uncommitted work"
         assert (wt / "uncommitted.txt").read_text() == "precious work"
+
+    def test_cleanup_worktree_removes_clean_tree_from_outside_cwd(
+        self, isolated_home, tmp_path, monkeypatch
+    ):
+        """The cwd-independent counterpart: a clean worktree is actually
+        removed even when the process cwd is not a git repository."""
+        import subprocess
+
+        from codeyx.teams.manager import TeamManager
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("base")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+
+        wt = repo.parent / "wt-clean"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", str(wt), "-b", "wt-clean"],
+            cwd=repo,
+            check=True,
+        )
+
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+
+        TeamManager()._cleanup_worktree(str(wt))
+
+        assert not wt.exists(), (
+            "clean worktree must be removed regardless of process cwd"
+        )
 
 
 # ---------------------------------------------------------------------------

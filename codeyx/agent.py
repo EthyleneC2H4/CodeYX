@@ -102,6 +102,16 @@ MAX_TOKENS_CEILING = 64000
 MAX_OUTPUT_TOKENS_RECOVERIES = 3
 
 
+def _malformed_call_reason(tc: Any) -> str:
+    """Human-readable reason a tool call was quarantined instead of run."""
+    if not tc.tool_id:
+        return f"Malformed tool call: missing tool_use id for {tc.tool_name}"
+    return (
+        f"Malformed tool call: arguments failed to parse as JSON for "
+        f"{tc.tool_name}; nothing was executed"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AgentEvent types
 # ---------------------------------------------------------------------------
@@ -589,6 +599,22 @@ class Agent:
                         reason=f"max_tokens recovery {recovery_count}/{MAX_OUTPUT_TOKENS_RECOVERIES}"
                     )
                     continue
+                else:
+                    # Escalated AND recoveries exhausted: this model keeps
+                    # truncating. Falling through would execute truncated
+                    # tool calls (arguments={}) — stop and surface instead.
+                    if response.text or conv_thinking:
+                        conversation.add_assistant_message(
+                            response.text, thinking_blocks=conv_thinking
+                        )
+                    yield ErrorEvent(
+                        message=(
+                            "Output token limit hit even after escalation and "
+                            f"{MAX_OUTPUT_TOKENS_RECOVERIES} recoveries; stopping "
+                            "rather than execute a truncated tool call."
+                        )
+                    )
+                    break
             else:
                 runtime_state.reset_output_recoveries()
 
@@ -617,14 +643,23 @@ class Agent:
                 yield LoopComplete(total_turns=iteration)
                 break
 
-            malformed_tool_calls = [tc for tc in response.tool_calls if not tc.tool_id]
-            valid_tool_calls = [tc for tc in response.tool_calls if tc.tool_id]
+            malformed_tool_calls = [
+                tc
+                for tc in response.tool_calls
+                if not tc.tool_id or tc.parse_error
+            ]
+            valid_tool_calls = [
+                tc
+                for tc in response.tool_calls
+                if tc.tool_id and not tc.parse_error
+            ]
             if malformed_tool_calls:
                 # Surface synthetic errors but keep going where possible:
                 # aborting the whole run here silently discarded any VALID
                 # sibling calls in the same response.
                 log.warning(
-                    "Dropping %d malformed tool call(s) without id",
+                    "Dropping %d unexecutable tool call(s) (missing id or "
+                    "unparsable arguments)",
                     len(malformed_tool_calls),
                 )
 
@@ -634,7 +669,7 @@ class Agent:
                 )
                 for tc in malformed_tool_calls:
                     result = ToolResultRecovery.synthetic_result(
-                        f"Malformed tool call: missing tool_use id for {tc.tool_name}"
+                        _malformed_call_reason(tc)
                     )
                     yield ToolResultEvent(
                         tool_id=tc.tool_id,
@@ -663,7 +698,7 @@ class Agent:
             # below exist purely so the UI can show what was dropped.
             for tc in malformed_tool_calls:
                 synthetic = ToolResultRecovery.synthetic_result(
-                    f"Malformed tool call: missing tool_use id for {tc.tool_name}"
+                    _malformed_call_reason(tc)
                 )
                 yield ToolResultEvent(
                     tool_id=tc.tool_id,
@@ -1227,8 +1262,55 @@ class Agent:
                 len(response.text), response.stop_reason,
             )
 
-            if not response.tool_calls:
-                conversation.add_assistant_message(response.text)
+            conv_thinking = [
+                ConvThinkingBlock(thinking=tb.thinking, signature=tb.signature)
+                for tb in response.thinking_blocks
+            ]
+
+            if response.stop_reason == "max_tokens":
+                # Truncated output: tool calls may be partial/corrupt
+                # (arguments={} after a failed JSON parse). The interactive
+                # loop refuses to execute truncated calls; mirror that here.
+                # Checked BEFORE the quarantine split so the all-quarantined
+                # case — the most-truncated one — still reports the note
+                # instead of returning bare cut-off prose.
+                log.warning(
+                    "[run_to_completion] agent=%s truncated at max_tokens; "
+                    "discarding %d tool call(s)",
+                    self.agent_id, len(response.tool_calls),
+                )
+                if response.text or conv_thinking:
+                    conversation.add_assistant_message(
+                        response.text, thinking_blocks=conv_thinking
+                    )
+                note = (
+                    "[Truncated by the max_tokens limit mid-tool-call; "
+                    "remaining work was discarded.]"
+                )
+                return f"{last_text}\n\n{note}" if last_text else note
+
+            # Same quarantine rule as the interactive loop: id-less or
+            # unparsable calls must never reach a tool.
+            bad_calls = [
+                tc for tc in response.tool_calls
+                if not tc.tool_id or tc.parse_error
+            ]
+            good_calls = [
+                tc for tc in response.tool_calls
+                if tc.tool_id and not tc.parse_error
+            ]
+            if bad_calls:
+                log.warning(
+                    "[run_to_completion] agent=%s dropping %d unexecutable "
+                    "tool call(s)",
+                    self.agent_id, len(bad_calls),
+                )
+
+            if not good_calls:
+                if response.text or conv_thinking:
+                    conversation.add_assistant_message(
+                        response.text, thinking_blocks=conv_thinking
+                    )
                 break
 
             tool_uses = [
@@ -1237,12 +1319,14 @@ class Agent:
                     tool_name=tc.tool_name,
                     arguments=tc.arguments,
                 )
-                for tc in response.tool_calls
+                for tc in good_calls
             ]
-            conversation.add_assistant_message(response.text, tool_uses)
+            conversation.add_assistant_message(
+                response.text, tool_uses, thinking_blocks=conv_thinking
+            )
 
             tool_results: list[ToolResultBlock] = []
-            for tc in response.tool_calls:
+            for tc in good_calls:
                 result = await self._execute_tool_noninteractive(tc)
                 content = self._maybe_persist_or_truncate(tc.tool_id, result)
                 tool_results.append(
@@ -1270,6 +1354,12 @@ class Agent:
         tool, error, _ = self._resolve_tool(tc)
         if error is not None:
             return error
+
+        # Same path-basis normalization as the interactive paths: relative
+        # arguments must resolve against this agent's work root, or a
+        # worktree-isolated agent gets permission-checked on one path while
+        # the tool writes to another.
+        self._normalize_path_arguments(tc)
 
         rejected = await self._run_pre_tool_hooks(tc)
         if rejected is not None:

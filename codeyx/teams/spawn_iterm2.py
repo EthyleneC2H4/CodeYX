@@ -51,7 +51,13 @@ def spawn_iterm2_teammate(
     )
 
     try:
-        session_id = _run_it2("split-pane", "--command", f"/bin/zsh -c '{cli_cmd}'")
+        # _shquote (not naive '...' wrapping): cli_cmd itself contains
+        # _shquote-escaped single quotes; embedding it raw inside an outer
+        # pair of quotes closed them early and let embedded ; && $() run as
+        # top-level commands in the new pane.
+        from codeyx.teams.spawn_tmux import _shquote
+
+        session_id = _run_it2("split-pane", "--command", f"/bin/zsh -c {_shquote(cli_cmd)}")
     except ITermSpawnError as e:
         raise ITermSpawnError(f"Failed to spawn iTerm2 pane for {teammate_name}: {e}") from e
 

@@ -6,9 +6,9 @@ All notable changes to CodeYX are documented here. The format follows
 
 ## [0.2.0] - 2026-08-25
 
-Security and reliability hardening release: a full-project audit surfaced 50
-confirmed defects across three severity waves; all are fixed with regression
-tests (suite grew from ~608 to 740+ tests).
+Security and reliability hardening release: a full-project audit plus two
+adversarial final-review passes surfaced ~84 confirmed defects; all are fixed
+with regression tests (suite grew from ~608 to 792 tests).
 
 ### Security
 
@@ -53,6 +53,80 @@ tests (suite grew from ~608 to 740+ tests).
 - git/tmux subprocess calls run off the event loop (`asyncio.to_thread`).
 - TaskManager/TraceManager retention is bounded; malformed tool calls missing
   IDs no longer abort the run and discard valid sibling calls.
+
+Post-audit adversarial final review (two fresh-perspective passes over the
+whole cumulative diff, plus an adversarial verification pass over the review
+fixes themselves — ~42 additional confirmed defects fixed with 65 new
+regression tests). The verification pass caught 8 real defects in the first
+two rounds' own fixes; all were repaired:
+
+### Security
+
+- Bare `&` is treated as a command separator in both the Layer-1 safe-command
+  allowlist and the dangerous-command segmenter — `cat README.md & rm -rf ~`
+  can no longer smuggle a backgrounded payload past either check.
+- Tool-call arguments that fail JSON parsing are flagged (`parse_error`) and
+  quarantined like ID-less calls across all three protocols: never executed,
+  reported to the model as a synthetic error instead.
+- Paths containing NUL bytes are denied by the sandbox (both in the final
+  filename and in not-yet-existing ancestors) instead of crashing mid-check.
+- Foreground sub-agents can no longer reach session-root tools
+  (`SessionSpawn`, notification polling) via tool resolution.
+- Teammate spawn-cancel rollback now waits (bounded) for the un-cancellable
+  tmux/iTerm2 spawner thread, kills any pane it already created, and only
+  then removes registration and worktree — previously cancellation could
+  delete the worktree under a live spawn thread and orphan a token-consuming
+  pane that `delete_team` could never see.
+
+### Fixed
+
+- The OpenAI Responses client now handles the real terminal events:
+  `response.incomplete` maps `max_output_tokens` to the max_tokens recovery
+  path and other reasons pass through; `response.failed` terminates the
+  stream with usage. Truncation is no longer silently undetectable.
+- Compat/DeepSeek clients surface unknown finish reasons (e.g.
+  `content_filter`) verbatim instead of masquerading as `end_turn`.
+- A cancelled turn whose task dies before its first step releases the turn
+  latch via a done-callback watcher; an older cancelled task cannot clear a
+  newer turn's claim (ownership guard).
+- Ctrl+Q during a streaming answer cancels and joins the live agent turn
+  before memory extraction / session close / manager teardown.
+- TaskManager drains completion notifications before reaping aged entries,
+  so a completion that waited out its retention window is still delivered.
+- Cancellation during teammate spawn fully rolls back: trace marked,
+  registration and name-registry entries removed, worktree cleaned up
+  (explicit CancelledError branches — it is a BaseException).
+- ExitWorktree restores the host root BEFORE removing the worktree; if the
+  switch-back fails on `remove`, removal is refused and the tree is kept.
+- `git worktree remove` runs with `cwd=worktree_path`, so teammate-worktree
+  cleanup works regardless of the process working directory.
+- SharedTaskStore mirrors an externally deleted store file instead of
+  resurrecting stale tasks from memory.
+- `run_to_completion` preserves signed thinking blocks on every assistant
+  message (extended-thinking replay invariant) and never executes tool calls
+  truncated by the max_tokens limit — including after escalation is
+  exhausted, where it now stops with an explicit error.
+- Auto-compaction resets the stale pre-compact token reading, preventing an
+  immediate second summarization of the fresh summary.
+- Session resume resets the history cursor on CompactNotification, so replay
+  slices stay consistent (no empty/half turns, no orphan tool_result).
+- The gitignore engine was rewritten chunk-based: `**` matches root-level
+  paths, ancestor rules resolve first with last-match-wins so final-segment
+  negations win, matching real git semantics. The verification pass repaired
+  two regressions in that rewrite: trailing `**` patterns (`build/**`, the
+  most common ignore idiom) match everything beneath again instead of never
+  matching, and `[...]` character classes (`*.py[cod]`) work like fnmatch.
+- Compat/DeepSeek folded-usage handling only terminates the stream on a
+  chunk with a terminal finish reason — gateways reporting cumulative usage
+  on every chunk can no longer end the stream at chunk 1 and mask a later
+  `length` truncation.
+- `run_to_completion` reports the max_tokens truncation note even when every
+  tool call in the truncated response was quarantined (the most-truncated
+  case previously returned bare cut-off prose).
+- `/worktree exit --remove` refuses on a dirty tree BEFORE re-rooting the
+  host (the tool path already did); `/worktree create` is now covered by the
+  same one-live-session guard as `enter`, so it cannot strand an active
+  session's bookkeeping.
 
 ### Changed
 

@@ -143,7 +143,7 @@ codeyx/
 ├── client.py         # LLM 抽象（4 种协议）
 ├── conversation.py   # 消息模型 + 多协议序列化
 ├── prompts.py        # 按优先级组装系统提示词
-├── tools/            # 内置工具（base + 20 余个实现）
+├── tools/            # 内置工具（base + 15 个核心实现）
 ├── runtime/          # 串行 + 有界并发工具调度器
 ├── permissions/      # 权限检查器 · 危险命令检测 · 沙箱 · 规则引擎
 ├── context/          # 两层压缩 + ContentReplacementState

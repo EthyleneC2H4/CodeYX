@@ -3,27 +3,115 @@
 Implements just enough of the gitignore spec to keep search tools out of
 build artifacts, vendored trees and hidden directories: blank lines,
 comments, trailing-/ directory-only patterns, leading-/ root anchoring,
-basename patterns at any depth, and last-match-wins negation. Nested
-.gitignore files and advanced syntax (** bridging, character-class
-anchors) are deliberately out of scope — this is a relevance filter,
-not a VCS implementation.
+basename patterns at any depth, last-match-wins negation, the
+"excluded parent dir cannot be re-included" rule, and per-segment wildcard
+semantics (`*` never crosses `/`). Nested .gitignore files are deliberately
+out of scope — this is a relevance filter, not a VCS implementation.
 """
 
 from __future__ import annotations
 
-import fnmatch
+import re
 from pathlib import Path
 
 from codeyx.tools.base import SKIP_DIRS
 
 
 class IgnoreRule:
-    __slots__ = ("pattern", "negated", "dir_only")
+    __slots__ = ("pattern", "negated", "dir_only", "regex")
 
     def __init__(self, pattern: str, negated: bool, dir_only: bool) -> None:
         self.pattern = pattern
         self.negated = negated
         self.dir_only = dir_only
+        self.regex = re.compile(_gitignore_to_regex(pattern))
+
+    def matches(self, rel_str: str) -> bool:
+        return self.regex.match(rel_str) is not None
+
+
+def _translate_segment(seg: str) -> str:
+    """Translate one non-`**` path segment to a single-segment regex.
+
+    `*` and `?` stay within the segment; `[...]` character classes are
+    honored like fnmatch did (`[!...]` negates, an unmatched `[` stays
+    literal); everything else is escaped verbatim.
+    """
+    buf: list[str] = []
+    i = 0
+    n = len(seg)
+    while i < n:
+        ch = seg[i]
+        if ch == "*":
+            buf.append(r"[^/]*")
+            i += 1
+        elif ch == "?":
+            buf.append(r"[^/]")
+            i += 1
+        elif ch == "[":
+            j = i + 1
+            if j < n and seg[j] == "!":
+                j += 1
+            if j < n and seg[j] == "]":
+                j += 1  # a ']' right after '[' or '[!' is literal (fnmatch)
+            end = seg.find("]", j)
+            if end == -1:
+                buf.append(re.escape(ch))
+                i += 1
+            else:
+                inner = seg[i + 1 : end].replace("\\", "\\\\")
+                if inner.startswith("!"):
+                    inner = "^" + inner[1:]
+                elif inner.startswith("^"):
+                    inner = "\\" + inner
+                buf.append(f"[{inner}]")
+                i = end + 1
+        else:
+            buf.append(re.escape(ch))
+            i += 1
+    return "".join(buf)
+
+
+def _gitignore_to_regex(pattern: str) -> str:
+    """Translate one gitignore pattern to an anchored regex.
+
+    `*` and `?` stay within a single path segment (fnmatch's `*` would
+    cross `/` and over-hide nested files); a literal `**` segment spans
+    directories — leading/middle `**/` matches zero or more segments,
+    so `**/gen.py` also hits a root-level gen.py exactly like git, and
+    a trailing `**` matches everything beneath (`build/**` never matches
+    paths outside build/). Patterns containing `/` anchor at the root;
+    bare patterns match the basename at any depth.
+    """
+    segments = pattern.split("/")
+    # Trailing '**': drop it and require a non-empty remainder instead —
+    # emitting "(?:[^/]+/)*$" would demand the path END in '/', which no
+    # real path does, silently disabling the most common ignore idiom.
+    trailing_globstar = segments[-1] == "**"
+    if trailing_globstar:
+        segments = segments[:-1]
+
+    parts: list[str] = []
+    for seg in segments:
+        if seg == "**":
+            # Whole-segment wildcard emitted as zero-or-more "dir/"
+            # groups so concatenation keeps the separators balanced.
+            parts.append(r"(?:[^/]+/)*")
+        else:
+            parts.append(_translate_segment(seg) + "/")
+    body = "".join(parts)
+
+    if trailing_globstar:
+        if "/" in pattern.strip("/"):
+            return rf"^{body}.+$"
+        # Bare '**': match every path.
+        return r"(?:^|.*/).+$"
+    if body.endswith("/"):
+        body = body[:-1]
+    if "/" in pattern.strip("/"):
+        return rf"^{body}$"
+    # Basename pattern: match as the last segment at any depth.
+    return rf"(?:^|.*/){body}$"
 
 
 class IgnoreSpec:
@@ -66,23 +154,30 @@ class IgnoreSpec:
     def is_ignored(self, rel_parts: tuple[str, ...], is_dir: bool = False) -> bool:
         """True when the given base-relative path should be skipped.
 
-        Ancestor directories are checked too, so one matching `build/`
-        rule ignores everything beneath build/ regardless of its own name.
+        Ancestor directory prefixes are resolved first (last match wins
+        per prefix): git never descends into an excluded directory, so an
+        excluded ancestor makes everything beneath it ignored — no later
+        negation, even one naming the file itself, can re-include from
+        below.
         """
-        ignored = False
-        for depth in range(1, len(rel_parts) + 1):
-            prefix = rel_parts[:depth]
-            target_is_dir = depth < len(rel_parts) or is_dir
-            rel_str = "/".join(prefix)
+        last_depth = len(rel_parts)
+        for depth in range(1, last_depth):
+            rel_str = "/".join(rel_parts[:depth])
+            excluded = False
             for rule in self._rules:
-                if rule.dir_only and not target_is_dir:
-                    continue
-                if "/" in rule.pattern:
-                    hit = fnmatch.fnmatch(rel_str, rule.pattern)
-                else:
-                    hit = fnmatch.fnmatch(prefix[-1], rule.pattern)
-                if hit:
-                    ignored = not rule.negated
+                # Ancestors are directories, so dir-only rules apply too.
+                if rule.matches(rel_str):
+                    excluded = not rule.negated
+            if excluded:
+                return True
+
+        rel_str = "/".join(rel_parts)
+        ignored = False
+        for rule in self._rules:
+            if rule.dir_only and not is_dir:
+                continue
+            if rule.matches(rel_str):
+                ignored = not rule.negated
         return ignored
 
 
