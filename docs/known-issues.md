@@ -582,6 +582,7 @@ tests/test-summary.md
 - ruff 全绿（E/F/I/N/W/UP 全量门禁，E501 保持咨询性）；str-Enum 迁移 StrEnum；导入规范化（dialog 组件提升到模块级）。
 - pytest 配置修正（移除孤儿 `--cov-report`、显式 asyncio fixture loop scope）；mock LLM 工具 ID 单轮内自增去重；scenario runner protocol 参数化；`AgentToolParams.isolation` 显式校验非法值。
 - 删除零引用的 `session_dialog.py`；移除 tests 下两份个人学习文档；新增 `config.example.yaml`。
+- CI 修复：工作流因仓库长期无活动被 GitHub 自动禁用（`disabled_inactivity`），Actions 页展示的失败全部是旧提交 `ef375eb` 的每周定时运行；重构推送后工作流已随对 test.yml 的修改重新启用，lint 门禁从 E9/F63/F7 关键子集升级为全量 ruff（代码库已全绿）。
 - 全量验证：`uv run python -m pytest tests/ -q` → **647 passed**；`uv run ruff check codeyx tests` → **All checks passed**；123 个模块全量导入无错。
 
 **对抗式审查修复轮（两路并行复审：安全路径 / 并发正确性）**
